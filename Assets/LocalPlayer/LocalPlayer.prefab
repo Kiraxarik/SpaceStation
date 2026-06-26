@@ -14,6 +14,8 @@ GameObject:
   - component: {fileID: 5995462410381527121}
   - component: {fileID: -4954268500058437707}
   - component: {fileID: -4829456312037689329}
+  - component: {fileID: 5810078888313133245}
+  - component: {fileID: -8022175921982684652}
   m_Layer: 0
   m_Name: LocalPlayer
   m_TagString: Untagged
@@ -154,3 +156,28 @@ MonoBehaviour:
   Importance: 1
   MaxSendRate: 0
   prefabId: f18edadd117b49f44bfebf8326b023b5
+--- !u!114 &5810078888313133245
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 8886965064207375710}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 9d5e56829b6c7834a9e3ac32cecc642d, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::Assets.LocalPlayer.Scripts.Input.NewMonoBehaviour
+--- !u!114 &-8022175921982684652
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 8886965064207375710}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: bfdaa6c06fe64fbda2b16e07a4ee0b25, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Unity.NetCode.Authoring.Hybrid::Unity.NetCode.GhostAuthoringInspectionComponent
+  ComponentOverrides: []

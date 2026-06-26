@@ -44,6 +44,9 @@ public partial class ChunkStreamingSystem : SystemBase
     {
         // ── 1. Find player chunk coord ─────────────────────────────────────────
         if (_playerQuery.IsEmpty) return;
+        if (!SystemAPI.HasSingleton<ChunkViewDistanceSettings>()) return;
+
+        var viewDistance = SystemAPI.GetSingleton<ChunkViewDistanceSettings>();
 
         var playerTransform = EntityManager.GetComponentData<LocalTransform>(
             _playerQuery.GetSingletonEntity());
@@ -63,7 +66,7 @@ public partial class ChunkStreamingSystem : SystemBase
                        RefRW<ChunkRenderEntity>>()
                 .WithEntityAccess())
         {
-            ChunkLODLevel target = TargetLOD(pos.ValueRO.Coord, playerChunk);
+            ChunkLODLevel target = TargetLOD(pos.ValueRO.Coord, playerChunk, viewDistance);
             ChunkLODLevel current = lodState.ValueRO.Level;
 
             if (target == current) continue;
@@ -131,17 +134,17 @@ public partial class ChunkStreamingSystem : SystemBase
 
     // ── LOD tier selection ────────────────────────────────────────────────────
 
-    static ChunkLODLevel TargetLOD(int3 chunkCoord, int3 playerChunk)
+    static ChunkLODLevel TargetLOD(int3 chunkCoord, int3 playerChunk, ChunkViewDistanceSettings settings)
     {
         // Chebyshev distance: max of per-axis distances
         int3 diff = chunkCoord - playerChunk;
         // Ignore Y for a flat-station layout: only X/Z distance matters
         int dist = math.max(math.abs(diff.x), math.abs(diff.z));
 
-        if (dist <= ChunkLODSettings.FullDetailRadius) return ChunkLODLevel.Full;
-        if (dist <= ChunkLODSettings.MediumLODRadius) return ChunkLODLevel.Medium;
-        if (dist <= ChunkLODSettings.FarLODRadius) return ChunkLODLevel.Far;
-        if (dist <= ChunkLODSettings.VeryFarRadius) return ChunkLODLevel.VeryFar;
+        if (dist <= settings.FullDetailRadius) return ChunkLODLevel.Full;
+        if (dist <= settings.MediumLODRadius) return ChunkLODLevel.Medium;
+        if (dist <= settings.FarLODRadius) return ChunkLODLevel.Far;
+        if (dist <= settings.VeryFarRadius) return ChunkLODLevel.VeryFar;
         return ChunkLODLevel.Unloaded;
     }
 

@@ -1,11 +1,6 @@
 using Unity.Entities;
 using Unity.NetCode;
 
-/// <summary>
-/// Runs once per new connection on the client. Marks the connection as
-/// "in game" (so snapshots start flowing) and sends GoInGameRequest to
-/// tell the server to spawn this client's player.
-/// </summary>
 [WorldSystemFilter(WorldSystemFilterFlags.ClientSimulation)]
 public partial struct GoInGameClientSystem : ISystem
 {
@@ -14,7 +9,7 @@ public partial struct GoInGameClientSystem : ISystem
         var ecb = new EntityCommandBuffer(Unity.Collections.Allocator.Temp);
 
         foreach (var (id, entity) in
-                 SystemAPI.Query<RefRO<NetworkId>>()
+            SystemAPI.Query<RefRO<NetworkId>>()
                      .WithNone<NetworkStreamInGame>()
                      .WithEntityAccess())
         {
@@ -22,9 +17,13 @@ public partial struct GoInGameClientSystem : ISystem
 
             Entity req = ecb.CreateEntity();
             ecb.AddComponent(req, new GoInGameRequest());
-            ecb.AddComponent(req, new SendRpcCommandRequest());
+            ecb.AddComponent(req, new SendRpcCommandRequest
+            {
+                TargetConnection = entity  // ← send to the server connection specifically
+            });
         }
 
         ecb.Playback(state.EntityManager);
+        ecb.Dispose();
     }
 }

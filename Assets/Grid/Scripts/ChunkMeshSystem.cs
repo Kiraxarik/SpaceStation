@@ -172,15 +172,23 @@ public struct BuildChunkMeshJob : IJob
         Vertices.Add(new float3(c2.x, c2.y, c2.z));
         Vertices.Add(new float3(c3.x, c3.y, c3.z));
 
-        // UVs: atlas tile col/row + local size for tiling.
-        // Assumes 16-column atlas layout; adjust ATLAS_COLS to match your texture.
+        // UVs: atlas tile col/row, normalized into 0-1 atlas space.
+        // Note: this stretches a single atlas tile across the whole merged
+        // quad rather than repeating it per-block. True per-block repeat
+        // within an atlas cell needs a custom shader (frac-based sampling),
+        // since standard texture wrap modes repeat the whole texture, not a
+        // sub-region of it. Ask if you want that shader written.
         const int ATLAS_COLS = 16;
-        float tu = tile % ATLAS_COLS;
-        float tv = tile / ATLAS_COLS;
-        UVs.Add(new float2(tu, tv));
-        UVs.Add(new float2(tu + w, tv));
-        UVs.Add(new float2(tu + w, tv + h));
-        UVs.Add(new float2(tu, tv + h));
+        float tileSize = 1f / ATLAS_COLS;
+        float u0 = (tile % ATLAS_COLS) * tileSize;
+        float v0 = (tile / ATLAS_COLS) * tileSize;
+        float u1 = u0 + tileSize;
+        float v1 = v0 + tileSize;
+
+        UVs.Add(new float2(u0, v0));
+        UVs.Add(new float2(u1, v0));
+        UVs.Add(new float2(u1, v1));
+        UVs.Add(new float2(u0, v1));
 
         if (forward)
         {
@@ -301,15 +309,27 @@ public partial class ChunkMeshSystem : SystemBase
     {
         EnsurePrototype();
 
+        // Count how many dirty chunks exist
+        int dirtyCount = 0;
+        foreach (var _ in SystemAPI.Query<RefRO<ChunkPosition>>().WithAll<ChunkDirty>())
+            dirtyCount++;
+
+        //if (dirtyCount > 0)
+        //Debug.Log($"ChunkMeshSystem: {dirtyCount} dirty chunks to process");
+
+
+
         // ── Pass 1: collect, schedule ──────────────────────────────────────────
         var buildResults = new System.Collections.Generic.List<ChunkBuildResult>();
 
-        foreach (var (pos, blocks, entity) in
-            SystemAPI
-                .Query<RefRO<ChunkPosition>, DynamicBuffer<BlockElement>>()
-                .WithAll<ChunkDirty>()
-                .WithEntityAccess())
+        foreach (var (pos, blocks, lod, entity) in
+    SystemAPI
+        .Query<RefRO<ChunkPosition>, DynamicBuffer<BlockElement>, RefRO<ChunkLODState>>()
+        .WithAll<ChunkDirty>()
+        .WithEntityAccess())
         {
+            if (lod.ValueRO.Level != ChunkLODLevel.Full) continue;
+
             var blocksCopy = new NativeArray<byte>(ChunkSettings.VOLUME, Allocator.TempJob);
             blocksCopy.CopyFrom(blocks.AsNativeArray().Reinterpret<byte>());
 

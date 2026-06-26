@@ -3,16 +3,9 @@ using Unity.NetCode;
 using Unity.Networking.Transport;
 using UnityEngine;
 
-/// <summary>
-/// Minimal local-testing helper. Put this on a GameObject in your main scene
-/// (NOT a sub-scene). Click "Host" in one Editor instance / build, and
-/// "Join" in another (e.g. via ParrelSync, a second build, or Multiplayer
-/// Play Mode) to connect to localhost.
-/// </summary>
 public class NetworkBootstrap : MonoBehaviour
 {
     public ushort Port = 7979;
-
     bool _started;
 
     void OnGUI()
@@ -22,53 +15,62 @@ public class NetworkBootstrap : MonoBehaviour
 
         if (_started)
         {
-            GUI.Label(new Rect(10, 10, 500, 40), "Networking already started this session.", bigLabel);
+            GUI.Label(new Rect(10, 10, 500, 40), "Networking already started.", bigLabel);
             return;
         }
 
         GUILayout.BeginArea(new Rect(10, 10, 400, 220));
-
-        if (GUILayout.Button("Host", bigButton, GUILayout.Height(80)))
-        {
-            _started = true;
-            StartHost();
-        }
-
-        if (GUILayout.Button("Join localhost", bigButton, GUILayout.Height(80)))
-        {
-            _started = true;
-            StartClient();
-        }
-
+        if (GUILayout.Button("Host", bigButton, GUILayout.Height(80))) { _started = true; StartHost(); }
+        if (GUILayout.Button("Join localhost", bigButton, GUILayout.Height(80))) { _started = true; StartClient(); }
         GUILayout.EndArea();
     }
 
     void StartHost()
     {
-        // Creates (or reuses) a server world and a client world for the host's
-        // own player, then starts listening / connecting via the
-        // NetworkStreamDriver singleton (present in both worlds).
-        var server = ClientServerBootstrap.CreateServerWorld("ServerWorld");
-        var client = ClientServerBootstrap.CreateClientWorld("ClientWorld");
+        // Use the worlds NetCode already created — don't make new ones
+        var server = GetExistingWorld("ServerWorld");
+        var client = GetExistingWorld("ClientWorld");
 
-        var ep = NetworkEndpoint.AnyIpv4.WithPort(Port);
-        var serverDriverQuery = server.EntityManager.CreateEntityQuery(
-            ComponentType.ReadWrite<NetworkStreamDriver>());
-        serverDriverQuery.GetSingletonRW<NetworkStreamDriver>().ValueRW.Listen(ep);
+        if (server == null || client == null)
+        {
+            Debug.LogError("ServerWorld or ClientWorld not found. Make sure NetCode auto-bootstrap is running.");
+            return;
+        }
 
-        var serverEp = NetworkEndpoint.LoopbackIpv4.WithPort(Port);
-        var clientDriverQuery = client.EntityManager.CreateEntityQuery(
-            ComponentType.ReadWrite<NetworkStreamDriver>());
-        clientDriverQuery.GetSingletonRW<NetworkStreamDriver>().ValueRW.Connect(client.EntityManager, serverEp);
+        var listenEp = NetworkEndpoint.AnyIpv4.WithPort(Port);
+        server.EntityManager
+              .CreateEntityQuery(ComponentType.ReadWrite<NetworkStreamDriver>())
+              .GetSingletonRW<NetworkStreamDriver>().ValueRW
+              .Listen(listenEp);
+
+        var connectEp = NetworkEndpoint.LoopbackIpv4.WithPort(Port);
+        client.EntityManager
+              .CreateEntityQuery(ComponentType.ReadWrite<NetworkStreamDriver>())
+              .GetSingletonRW<NetworkStreamDriver>().ValueRW
+              .Connect(client.EntityManager, connectEp);
     }
 
     void StartClient()
     {
-        var client = ClientServerBootstrap.CreateClientWorld("ClientWorld");
+        var client = GetExistingWorld("ClientWorld");
 
-        var ep = NetworkEndpoint.LoopbackIpv4.WithPort(Port);
-        var clientDriverQuery = client.EntityManager.CreateEntityQuery(
-            ComponentType.ReadWrite<NetworkStreamDriver>());
-        clientDriverQuery.GetSingletonRW<NetworkStreamDriver>().ValueRW.Connect(client.EntityManager, ep);
+        if (client == null)
+        {
+            Debug.LogError("ClientWorld not found.");
+            return;
+        }
+
+        var connectEp = NetworkEndpoint.LoopbackIpv4.WithPort(Port);
+        client.EntityManager
+              .CreateEntityQuery(ComponentType.ReadWrite<NetworkStreamDriver>())
+              .GetSingletonRW<NetworkStreamDriver>().ValueRW
+              .Connect(client.EntityManager, connectEp);
+    }
+
+    static World GetExistingWorld(string name)
+    {
+        foreach (var world in World.All)
+            if (world.Name == name) return world;
+        return null;
     }
 }

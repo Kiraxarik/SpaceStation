@@ -1,6 +1,7 @@
 using Unity.Entities;
 using Unity.Mathematics;
 using Unity.Collections;
+using UnityEngine;
 
 /// <summary>
 /// Spawns the initial chunk grid and wires up neighbor slices.
@@ -12,10 +13,12 @@ using Unity.Collections;
 /// </summary>
 public partial struct ChunkSpawnSystem : ISystem
 {
-    const int WORLD_SIZE = 100;
+    const int WORLD_SIZE = 5;
 
     public void OnCreate(ref SystemState state)
     {
+        //Debug.Log($"ChunkSpawnSystem OnCreate in world: '{state.World.Name}'");
+
         if (state.World.Name != "ClientWorld") { state.Enabled = false; return; }
 
         for (int x = 0; x < WORLD_SIZE; x++)

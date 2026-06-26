@@ -11,9 +11,14 @@ public struct PlayerSpawner : IComponentData
 }
 
 /// <summary>
-/// Drag your player prefab (the one with GhostAuthoringComponent on it) into
-/// the PlayerPrefab field, then place this on any GameObject inside your
-/// sub-scene. It bakes down into the PlayerSpawner singleton above.
+/// Anchors the player prefab into baking so NetCode includes it in the
+/// GhostCollection. Doesn't create the PlayerSpawner singleton itself —
+/// ServerPlayerSpawnerSystem auto-discovers the prefab at runtime (by
+/// finding the ghost prefab that has a GhostOwner component) and creates
+/// the singleton from that. This script's only job is making sure the
+/// prefab is reachable by baking at all; without a reference like this
+/// somewhere in a loaded sub-scene, the prefab never becomes a registered
+/// ghost in the first place.
 /// </summary>
 [DisallowMultipleComponent]
 public class PlayerSpawnerAuthoring : MonoBehaviour
@@ -25,10 +30,9 @@ public class PlayerSpawnerBaker : Baker<PlayerSpawnerAuthoring>
 {
     public override void Bake(PlayerSpawnerAuthoring authoring)
     {
-        Entity entity = GetEntity(TransformUsageFlags.None);
-        AddComponent(entity, new PlayerSpawner
-        {
-            PlayerPrefab = GetEntity(authoring.PlayerPrefab, TransformUsageFlags.Dynamic)
-        });
+        // Registering the reference is enough to pull the prefab into baking
+        // and therefore into the GhostCollection. We don't need to store it
+        // on an entity ourselves.
+        GetEntity(authoring.PlayerPrefab, TransformUsageFlags.Dynamic);
     }
 }
