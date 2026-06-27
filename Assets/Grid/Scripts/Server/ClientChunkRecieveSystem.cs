@@ -1,0 +1,268 @@
+using Unity.Burst;
+using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
+using Unity.Entities;
+using Unity.Mathematics;
+using Unity.NetCode;
+
+// ── Job: apply incoming block-change deltas ───────────────────────────────────
+
+/// <summary>
+/// Appends each BlockChangeRpc to the target chunk's ChunkBlockUpdate buffer.
+/// Single-threaded: buffer appends via lookup must not race.
+/// Deltas for chunks the client doesn't have are dropped (it will get correct
+/// state from the next full ChunkDataRpc / snapshot).
+/// </summary>
+[BurstCompile]
+partial struct ApplyDeltasJob : IJobEntity
+{
+    public EntityCommandBuffer Ecb;
+    [ReadOnly] public NativeHashMap<int3, Entity> Registry;
+    [NativeDisableContainerSafetyRestriction]
+    public BufferLookup<ChunkBlockUpdate> UpdateBuffers;
+
+    public void Execute(Entity rpcEntity, in BlockChangeRpc data)
+    {
+        if (Registry.TryGetValue(data.ChunkCoord, out Entity chunkEntity)
+            && UpdateBuffers.HasBuffer(chunkEntity))
+        {
+            UpdateBuffers[chunkEntity].Add(new ChunkBlockUpdate
+            {
+                BlockIndex = data.BlockIndex,
+                NewValue = data.NewValue,
+            });
+        }
+        Ecb.DestroyEntity(rpcEntity);
+    }
+}
+
+// ── System ────────────────────────────────────────────────────────────────────
+
+/// <summary>
+/// Client-side chunk reception for the placement-driven model.
+///
+/// Owns the ChunkCoordRegistry. Responsibilities:
+///   1. On going in-game, send RequestWorldSnapshotRpc exactly once.
+///   2. Receive ChunkDataRpc: create the chunk entity if new (or refill an
+///      existing one), populate its block buffer, mark dirty.
+///   3. Receive BlockChangeRpc: queue the delta onto the chunk's update buffer
+///      (drained by ChunkApplySystem).
+///
+/// Full-chunk reception (step 2) runs on the main thread because it performs
+/// structural changes (entity creation, managed ChunkNeighborSlices). The delta
+/// path (step 3) is a Burst job.
+/// </summary>
+[WorldSystemFilter(WorldSystemFilterFlags.ClientSimulation)]
+public partial class ClientChunkReceiveSystem : SystemBase
+{
+    NativeHashMap<int3, Entity> _coordToEntity;
+    EntityQuery _connectionQuery;
+
+    protected override void OnCreate()
+    {
+        _coordToEntity = new NativeHashMap<int3, Entity>(4096, Allocator.Persistent);
+
+        var registryEntity = EntityManager.CreateEntity();
+        EntityManager.AddComponentData(registryEntity, new ChunkCoordRegistry
+        {
+            Map = _coordToEntity
+        });
+
+        _connectionQuery = GetEntityQuery(
+            ComponentType.ReadOnly<NetworkId>(),
+            ComponentType.ReadOnly<NetworkStreamInGame>());
+
+        RequireForUpdate<NetworkStreamInGame>();
+    }
+
+    protected override void OnDestroy()
+    {
+        if (_coordToEntity.IsCreated) _coordToEntity.Dispose();
+    }
+
+    protected override void OnUpdate()
+    {
+        var ecb = new EntityCommandBuffer(Allocator.Temp);
+
+        // ── 1. Send the one-time world snapshot request ────────────────────────
+        // Tag the connection once it's in-game so we don't re-send every frame.
+        foreach (var (id, connectionEntity) in
+            SystemAPI.Query<RefRO<NetworkId>>()
+                     .WithAll<NetworkStreamInGame>()
+                     .WithNone<WorldSnapshotRequested>()
+                     .WithEntityAccess())
+        {
+            var req = ecb.CreateEntity();
+            ecb.AddComponent(req, new RequestWorldSnapshotRpc());
+            ecb.AddComponent(req, new SendRpcCommandRequest
+            {
+                TargetConnection = connectionEntity
+            });
+
+            ecb.AddComponent<WorldSnapshotRequested>(connectionEntity);
+        }
+
+        // ── 2. Receive full chunk payloads (main thread: structural changes) ───
+        foreach (var (data, rpcEntity) in
+            SystemAPI.Query<RefRO<ChunkDataRpc>>()
+                     .WithAll<ReceiveRpcCommandRequest>()
+                     .WithEntityAccess())
+        {
+            ReceiveChunk(data.ValueRO);
+            ecb.DestroyEntity(rpcEntity);
+        }
+
+        ecb.Playback(EntityManager);
+        ecb.Dispose();
+
+        // ── 3. Receive block-change deltas (Burst job) ─────────────────────────
+        var deltaEcb = new EntityCommandBuffer(Allocator.TempJob);
+        Dependency = new ApplyDeltasJob
+        {
+            Ecb = deltaEcb,
+            Registry = _coordToEntity,
+            UpdateBuffers = GetBufferLookup<ChunkBlockUpdate>(),
+        }.Schedule(Dependency);
+        Dependency.Complete();
+        deltaEcb.Playback(EntityManager);
+        deltaEcb.Dispose();
+    }
+
+    // ── Full chunk reception ──────────────────────────────────────────────────
+
+    void ReceiveChunk(in ChunkDataRpc data)
+    {
+        int3 coord = data.Coord;
+
+        if (!_coordToEntity.TryGetValue(coord, out Entity entity))
+        {
+            entity = CreateChunkEntity(coord);
+            _coordToEntity.TryAdd(coord, entity);
+        }
+
+        // Fill block buffer from the RPC payload.
+        var blocks = EntityManager.GetBuffer<BlockElement>(entity);
+        ChunkDataRpc local = data;
+        local.ToBuffer(blocks);
+
+        // Refresh slices on this chunk and its existing neighbors so cross-chunk
+        // culling is correct, then mark dirty.
+        RefreshNeighborSlices(entity, coord);
+
+        if (!EntityManager.HasComponent<ChunkDirty>(entity))
+            EntityManager.AddComponent<ChunkDirty>(entity);
+    }
+
+    Entity CreateChunkEntity(int3 coord)
+    {
+        Entity e = EntityManager.CreateEntity();
+        EntityManager.AddComponentData(e, new ChunkPosition { Coord = coord });
+
+        var blocks = EntityManager.AddBuffer<BlockElement>(e);
+        blocks.Resize(ChunkSettings.VOLUME, NativeArrayOptions.ClearMemory);
+
+        EntityManager.AddBuffer<ChunkBlockUpdate>(e);
+
+        // Chunks the server sends are always meant to be visible; start them at
+        // Full LOD. ChunkStreamingSystem (if present) can still retier them by
+        // distance afterwards.
+        EntityManager.AddComponentData(e, new ChunkLODState { Level = ChunkLODLevel.Full });
+        EntityManager.AddComponentData(e, new ChunkRenderEntity { Value = Entity.Null });
+        EntityManager.AddComponentObject(e, new ChunkNeighborSlices());
+
+        return e;
+    }
+
+    // ── Neighbor slice management ─────────────────────────────────────────────
+
+    void RefreshNeighborSlices(Entity entity, int3 coord)
+    {
+        if (!EntityManager.HasComponent<ChunkNeighborSlices>(entity)) return;
+        var ns = EntityManager.GetComponentObject<ChunkNeighborSlices>(entity);
+        var ourBlocks = EntityManager.GetBuffer<BlockElement>(entity)
+            .AsNativeArray().Reinterpret<byte>();
+
+        for (int dir = 0; dir < 6; dir++)
+        {
+            int3 neighborCoord = coord + DirOffset(dir);
+            if (!_coordToEntity.TryGetValue(neighborCoord, out Entity neighbor)) continue;
+            if (!EntityManager.HasBuffer<BlockElement>(neighbor)) continue;
+
+            var nb = EntityManager.GetBuffer<BlockElement>(neighbor)
+                .AsNativeArray().Reinterpret<byte>();
+
+            SetSlice(ns, dir, ExtractBorderSlice(nb, dir ^ 1));
+
+            if (EntityManager.HasComponent<ChunkNeighborSlices>(neighbor))
+            {
+                var nns = EntityManager.GetComponentObject<ChunkNeighborSlices>(neighbor);
+                SetSlice(nns, dir ^ 1, ExtractBorderSlice(ourBlocks, dir));
+
+                if (!EntityManager.HasComponent<ChunkDirty>(neighbor))
+                    EntityManager.AddComponent<ChunkDirty>(neighbor);
+            }
+        }
+    }
+
+    // ── Border slice extraction ───────────────────────────────────────────────
+
+    static byte[] ExtractBorderSlice(NativeArray<byte> blocks, int dir)
+    {
+        int S = ChunkSettings.SIZE;
+        var slice = new byte[ChunkSettings.FACE];
+        switch (dir)
+        {
+            case 0:
+                for (int x = 0; x < S; x++) for (int z = 0; z < S; z++)
+                    slice[ChunkSettings.SliceIndex(x, z)] = blocks[ChunkSettings.Index(x, S - 1, z)];
+                break;
+            case 1:
+                for (int x = 0; x < S; x++) for (int z = 0; z < S; z++)
+                    slice[ChunkSettings.SliceIndex(x, z)] = blocks[ChunkSettings.Index(x, 0, z)];
+                break;
+            case 2:
+                for (int z = 0; z < S; z++) for (int y = 0; y < S; y++)
+                    slice[ChunkSettings.SliceIndex(z, y)] = blocks[ChunkSettings.Index(S - 1, y, z)];
+                break;
+            case 3:
+                for (int z = 0; z < S; z++) for (int y = 0; y < S; y++)
+                    slice[ChunkSettings.SliceIndex(z, y)] = blocks[ChunkSettings.Index(0, y, z)];
+                break;
+            case 4:
+                for (int x = 0; x < S; x++) for (int y = 0; y < S; y++)
+                    slice[ChunkSettings.SliceIndex(x, y)] = blocks[ChunkSettings.Index(x, y, S - 1)];
+                break;
+            case 5:
+                for (int x = 0; x < S; x++) for (int y = 0; y < S; y++)
+                    slice[ChunkSettings.SliceIndex(x, y)] = blocks[ChunkSettings.Index(x, y, 0)];
+                break;
+        }
+        return slice;
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    static int3 DirOffset(int dir) => dir switch
+    {
+        0 => new int3(0, 1, 0),
+        1 => new int3(0, -1, 0),
+        2 => new int3(1, 0, 0),
+        3 => new int3(-1, 0, 0),
+        4 => new int3(0, 0, 1),
+        5 => new int3(0, 0, -1),
+        _ => int3.zero
+    };
+
+    static void SetSlice(ChunkNeighborSlices ns, int dir, byte[] s)
+    {
+        switch (dir)
+        {
+            case 0: ns.PosY = s; break;
+            case 1: ns.NegY = s; break;
+            case 2: ns.PosX = s; break;
+            case 3: ns.NegX = s; break;
+            case 4: ns.PosZ = s; break;
+            case 5: ns.NegZ = s; break;
+        }
+    }
+}

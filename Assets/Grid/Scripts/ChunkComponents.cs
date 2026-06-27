@@ -80,7 +80,7 @@ public struct ChunkDirty : IComponentData { }
 
 /// <summary>
 /// Stores the current LOD tier of this chunk.
-/// Set by ChunkStreamingSystem; read by both mesh systems.
+/// Set by the LOD system; read by both mesh systems.
 /// </summary>
 public struct ChunkLODState : IComponentData
 {
@@ -98,36 +98,25 @@ public struct ChunkRenderEntity : IComponentData
 }
 
 /// <summary>
-/// Tag: marks the local player entity so ChunkStreamingSystem can find it.
+/// Tag: marks the local player entity so the streaming/LOD system can find it.
 /// Add this to whatever entity carries the player's LocalTransform.
 /// </summary>
 public struct LocalPlayer : IComponentData { }
 
-/// <summary>
-/// Block-change delta from the server (or editor stub).
-/// Populate Index and Value, then add this component to a chunk entity.
-/// ChunkStreamingSystem will apply the change, remove this component,
-/// and mark the chunk dirty so its mesh rebuilds.
-///
-/// For bulk updates send multiple changes by processing them in a list;
-/// see ChunkStreamingSystem for the application site.
-///
-/// -- NETWORK SEAM --
-/// In production, NetworkChunkSystem should create these components when
-/// a block-change packet arrives for a chunk the client holds in cache.
-/// </summary>
-public struct ChunkBlockUpdate : IComponentData
-{
-    /// <summary>Flat block index — use ChunkSettings.Index(x,y,z).</summary>
-    public int BlockIndex;
-    /// <summary>New block byte value.</summary>
-    public byte NewValue;
-}
+// NOTE: ChunkBlockUpdate now lives in ChunkNetworkComponents.cs as an
+// IBufferElementData (so multiple same-frame changes to one chunk all survive).
+// The old IComponentData version that used to be here has been removed to
+// avoid a duplicate-type collision.
 
 /// <summary>
 /// Managed component: the six SIZE×SIZE border slices of neighboring chunks
 /// used by BuildChunkMeshJob for cross-chunk face culling.
-/// Defaults to all-solid (hides border faces until neighbor data arrives).
+///
+/// Defaults to all-AIR. In the placement-driven sparse model a chunk at the
+/// edge of the station has genuinely empty (non-existent) neighbors, so the
+/// outward-facing border faces MUST render against the void. An all-solid
+/// default would hide them and the station would look sealed off. Real
+/// neighbor data overwrites these slices when an adjacent chunk exists.
 /// </summary>
 public class ChunkNeighborSlices : IComponentData
 {
@@ -135,17 +124,13 @@ public class ChunkNeighborSlices : IComponentData
 
     public ChunkNeighborSlices()
     {
-        PosY = Solid(); NegY = Solid();
-        PosX = Solid(); NegX = Solid();
-        PosZ = Solid(); NegZ = Solid();
+        PosY = Air(); NegY = Air();
+        PosX = Air(); NegX = Air();
+        PosZ = Air(); NegZ = Air();
     }
 
-    static byte[] Solid()
-    {
-        var s = new byte[ChunkSettings.FACE];
-        for (int i = 0; i < s.Length; i++) s[i] = 1;
-        return s;
-    }
+    // Zero = air (face is shown). A freshly allocated byte[] is already zeroed.
+    static byte[] Air() => new byte[ChunkSettings.FACE];
 
     public byte[] ForDirection(int dir) => dir switch
     {

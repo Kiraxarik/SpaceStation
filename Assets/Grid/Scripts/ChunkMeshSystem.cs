@@ -177,7 +177,7 @@ public struct BuildChunkMeshJob : IJob
         // quad rather than repeating it per-block. True per-block repeat
         // within an atlas cell needs a custom shader (frac-based sampling),
         // since standard texture wrap modes repeat the whole texture, not a
-        // sub-region of it. Ask if you want that shader written.
+        // sub-region of it.
         const int ATLAS_COLS = 16;
         float tileSize = 1f / ATLAS_COLS;
         float u0 = (tile % ATLAS_COLS) * tileSize;
@@ -251,21 +251,45 @@ struct ChunkBuildResult
     public NativeList<float2> UVs;
     public NativeList<int> Triangles;
     public JobHandle Handle;
-    public bool IsFirstBuild;
+
+    /// <summary>
+    /// True when a ChunkMeshRef already exists on the chunk entity.
+    /// If true we clear and reuse the existing Mesh object instead of
+    /// allocating a new one — avoids a GC allocation on every LOD re-entry.
+    /// </summary>
+    public bool HasExistingMesh;
+
+    /// <summary>
+    /// The render entity that was live when Pass 1 ran, or Entity.Null when
+    /// none exists yet (first build, or re-entry after a LOD transition that
+    /// destroyed the previous render entity).
+    /// Pass 3 spawns a new render entity whenever this is Entity.Null.
+    /// </summary>
+    public Entity ExistingRenderEntity;
 }
 
-// ── System ────────────────────────────────────────────────────────────────────
+// ── System ───────────────────────
 
+/// <summary>
+/// Builds full-detail greedy meshes for chunks whose ChunkLODState is Full.
+/// LOD-downsampled chunks are handled by ChunkLODMeshSystem.
+///
+/// Three-pass structure inside OnUpdate keeps structural ECS changes
+/// (removing ChunkDirty) out of the query loops:
+///   Pass 1 — collect dirty Full chunks, snapshot state, schedule Burst jobs.
+///   Pass 2 — remove ChunkDirty from every scheduled chunk (structural change).
+///   Pass 3 — complete jobs, upload mesh data, create/reuse render entities.
+/// </summary>
+[UpdateAfter(typeof(ChunkLODSystem))]
 public partial class ChunkMeshSystem : SystemBase
 {
     Entity _prototype;
     Material _material;
-
-    // Burst-readable flattened block face atlas: blockID * 6 + faceDir
-    NativeArray<int> _blockFaceAtlas;
+    NativeArray<int> _blockFaceAtlas;   // blockID * 6 + faceDir → atlas tile index
 
     protected override void OnCreate()
     {
+        // Only meaningful in the rendering world
         if (World.Name != "ClientWorld") { Enabled = false; return; }
         BakeBlockFaceAtlas();
     }
@@ -274,6 +298,8 @@ public partial class ChunkMeshSystem : SystemBase
     {
         if (_blockFaceAtlas.IsCreated) _blockFaceAtlas.Dispose();
     }
+
+    // ── Atlas bake ────────────────────────────────────────────────────────────
 
     void BakeBlockFaceAtlas()
     {
@@ -284,6 +310,13 @@ public partial class ChunkMeshSystem : SystemBase
                 _blockFaceAtlas[i * 6 + d] = reg[i].ForDirection(d);
     }
 
+    // ── Prototype render entity ───────────────────────────────────────────────
+
+    /// <summary>
+    /// Creates a blank render entity once. Subsequent chunk render entities
+    /// are cloned from this template, then have their transform, bounds, and
+    /// RenderMeshArray overwritten with chunk-specific data.
+    /// </summary>
     void EnsurePrototype()
     {
         if (_material == null)
@@ -293,11 +326,11 @@ public partial class ChunkMeshSystem : SystemBase
 
         var blankMesh = new Mesh();
         var desc = new RenderMeshDescription(
-            shadowCastingMode: ShadowCastingMode.On,
-            receiveShadows: true);
+                                 shadowCastingMode: ShadowCastingMode.On,
+                                 receiveShadows: true);
         var renderMeshArray = new RenderMeshArray(
-            new Material[] { _material },
-            new Mesh[] { blankMesh });
+                                  new Material[] { _material },
+                                  new Mesh[] { blankMesh });
 
         _prototype = EntityManager.CreateEntity();
         RenderMeshUtility.AddComponents(_prototype, EntityManager, desc,
@@ -305,40 +338,37 @@ public partial class ChunkMeshSystem : SystemBase
         EntityManager.AddComponentData(_prototype, LocalTransform.Identity);
     }
 
+    // ── Main update ───────────────────────────────────────────────────────────
+
     protected override void OnUpdate()
     {
         EnsurePrototype();
 
-        // Count how many dirty chunks exist
-        int dirtyCount = 0;
-        foreach (var _ in SystemAPI.Query<RefRO<ChunkPosition>>().WithAll<ChunkDirty>())
-            dirtyCount++;
-
-        //if (dirtyCount > 0)
-        //Debug.Log($"ChunkMeshSystem: {dirtyCount} dirty chunks to process");
-
-
-
-        // ── Pass 1: collect, schedule ──────────────────────────────────────────
+        // ── Pass 1: collect dirty Full-LOD chunks, schedule Burst jobs ─────────
         var buildResults = new System.Collections.Generic.List<ChunkBuildResult>();
 
-        foreach (var (pos, blocks, lod, entity) in
-    SystemAPI
-        .Query<RefRO<ChunkPosition>, DynamicBuffer<BlockElement>, RefRO<ChunkLODState>>()
-        .WithAll<ChunkDirty>()
-        .WithEntityAccess())
+        foreach (var (pos, blocks, lod, renderRef, entity) in
+            SystemAPI
+                .Query<RefRO<ChunkPosition>,
+                       DynamicBuffer<BlockElement>,
+                       RefRO<ChunkLODState>,
+                       RefRO<ChunkRenderEntity>>()
+                .WithAll<ChunkDirty>()
+                .WithEntityAccess())
         {
+            // LOD-downsampled tiers are handled by ChunkLODMeshSystem
             if (lod.ValueRO.Level != ChunkLODLevel.Full) continue;
 
+            // Snapshot block data into a TempJob array for the Burst job
             var blocksCopy = new NativeArray<byte>(ChunkSettings.VOLUME, Allocator.TempJob);
             blocksCopy.CopyFrom(blocks.AsNativeArray().Reinterpret<byte>());
 
+            // Snapshot neighbor slices (managed component — can't pass to Burst directly)
             ChunkNeighborSlices ns =
                 EntityManager.HasComponent<ChunkNeighborSlices>(entity)
                     ? EntityManager.GetComponentObject<ChunkNeighborSlices>(entity)
-                    : new ChunkNeighborSlices(); // defaults all-solid
+                    : new ChunkNeighborSlices(); // defaults: all-solid
 
-            // Copy slices into NativeArrays for the job
             var nPosY = new NativeArray<byte>(ns.PosY, Allocator.TempJob);
             var nNegY = new NativeArray<byte>(ns.NegY, Allocator.TempJob);
             var nPosX = new NativeArray<byte>(ns.PosX, Allocator.TempJob);
@@ -365,7 +395,7 @@ public partial class ChunkMeshSystem : SystemBase
                 Triangles = tris,
             }.Schedule();
 
-            // Slice arrays are safe to dispose after the job completes
+            // Slice arrays are only needed until the job finishes
             nPosY.Dispose(handle); nNegY.Dispose(handle);
             nPosX.Dispose(handle); nNegX.Dispose(handle);
             nPosZ.Dispose(handle); nNegZ.Dispose(handle);
@@ -379,54 +409,54 @@ public partial class ChunkMeshSystem : SystemBase
                 UVs = uvs,
                 Triangles = tris,
                 Handle = handle,
-                IsFirstBuild = !EntityManager.HasComponent<ChunkMeshRef>(entity),
+
+                // Capture both mesh & render-entity state while still inside the query.
+                //
+                // HasExistingMesh:
+                //   Can we reuse the Mesh object already on this chunk entity?
+                //   True after any previous build regardless of LOD tier.
+                //
+                // ExistingRenderEntity:
+                //   The currently-live render entity, or Entity.Null.
+                //   ChunkStreamingSystem sets this to Entity.Null whenever it
+                //   destroys a render entity during a LOD transition, so we
+                //   must spawn a fresh one in that case even when a Mesh exists.
+                HasExistingMesh = EntityManager.HasComponent<ChunkMeshRef>(entity),
+                ExistingRenderEntity = renderRef.ValueRO.Value,
             });
         }
 
         // ── Pass 2: structural changes ─────────────────────────────────────────
+        // Remove ChunkDirty outside the query loop to avoid iterator invalidation.
         foreach (var r in buildResults)
             EntityManager.RemoveComponent<ChunkDirty>(r.Entity);
 
-        // ── Pass 3: complete, upload ───────────────────────────────────────────
+        // ── Pass 3: complete jobs, upload to GPU, manage render entities ───────
         foreach (var r in buildResults)
         {
             r.Handle.Complete();
 
+            // ── Resolve (or allocate) the Mesh object ──────────────────────────
+            //
+            // If a Mesh already exists from a prior build (any LOD tier), reuse
+            // it — Clear() is far cheaper than a new allocation.
+            // If this is genuinely the first build, allocate and register it.
             Mesh mesh;
-            if (r.IsFirstBuild)
-            {
-                mesh = new Mesh { name = $"Chunk {r.Coord.x},{r.Coord.z}" };
-                mesh.indexFormat = IndexFormat.UInt32;
-
-                var renderEntity = EntityManager.Instantiate(_prototype);
-
-                EntityManager.SetComponentData(renderEntity,
-                    LocalTransform.FromPosition((float3)(r.Coord * ChunkSettings.SIZE)));
-
-                EntityManager.SetComponentData(renderEntity, new RenderBounds
-                {
-                    Value = new Unity.Mathematics.AABB
-                    {
-                        Center = new float3(ChunkSettings.SIZE * 0.5f, ChunkSettings.SIZE * 0.5f, ChunkSettings.SIZE * 0.5f),
-                        Extents = new float3(ChunkSettings.SIZE * 0.5f, ChunkSettings.SIZE * 0.5f, ChunkSettings.SIZE * 0.5f)
-                    }
-                });
-
-                EntityManager.AddComponentObject(r.Entity, new ChunkMeshRef { Value = mesh });
-
-                var newArray = new RenderMeshArray(
-                    new Material[] { _material },
-                    new Mesh[] { mesh });
-                EntityManager.SetComponentData(renderEntity,
-                    MaterialMeshInfo.FromRenderMeshArrayIndices(0, 0));
-                EntityManager.SetSharedComponentManaged(renderEntity, newArray);
-            }
-            else
+            if (r.HasExistingMesh)
             {
                 mesh = EntityManager.GetComponentObject<ChunkMeshRef>(r.Entity).Value;
                 mesh.Clear();
             }
+            else
+            {
+                mesh = new Mesh { name = $"Chunk {r.Coord.x},{r.Coord.z}" };
+                mesh.indexFormat = IndexFormat.UInt32;
+                // AddComponentObject is a structural change but we're outside
+                // any query at this point so it's safe.
+                EntityManager.AddComponentObject(r.Entity, new ChunkMeshRef { Value = mesh });
+            }
 
+            // ── Upload vertex and index data ───────────────────────────────────
             mesh.SetVertices(r.Vertices.AsArray());
             mesh.SetUVs(0, r.UVs.AsArray());
 
@@ -440,6 +470,53 @@ public partial class ChunkMeshSystem : SystemBase
             mesh.RecalculateNormals();
             mesh.RecalculateBounds();
 
+            // ── Create a render entity if none is currently live ───────────────
+            //
+            // This covers two cases:
+            //   (a) First-ever build for this chunk.
+            //   (b) Re-entry after a LOD transition — ChunkStreamingSystem
+            //       destroyed the previous render entity and zeroed ChunkRenderEntity.
+            //
+            // When ExistingRenderEntity is NOT Entity.Null the render entity is
+            // still live and its RenderMeshArray already references the same Mesh
+            // object, so mutating the Mesh in-place above is sufficient.
+            if (r.ExistingRenderEntity == Entity.Null)
+            {
+                var renderEntity = EntityManager.Instantiate(_prototype);
+
+                EntityManager.SetComponentData(renderEntity,
+                    LocalTransform.FromPosition((float3)(r.Coord * ChunkSettings.SIZE)));
+
+                EntityManager.SetComponentData(renderEntity, new RenderBounds
+                {
+                    Value = new Unity.Mathematics.AABB
+                    {
+                        Center = new float3(ChunkSettings.SIZE * 0.5f,
+                                             ChunkSettings.SIZE * 0.5f,
+                                             ChunkSettings.SIZE * 0.5f),
+                        Extents = new float3(ChunkSettings.SIZE * 0.5f,
+                                             ChunkSettings.SIZE * 0.5f,
+                                             ChunkSettings.SIZE * 0.5f)
+                    }
+                });
+
+                // Bind the actual chunk mesh so DOTS Entities Graphics renders it
+                var newArray = new RenderMeshArray(
+                    new Material[] { _material },
+                    new Mesh[] { mesh });
+                EntityManager.SetComponentData(renderEntity,
+                    MaterialMeshInfo.FromRenderMeshArrayIndices(0, 0));
+                EntityManager.SetSharedComponentManaged(renderEntity, newArray);
+
+                // ── CRITICAL: write the render entity back to the chunk entity ──
+                // ChunkStreamingSystem reads ChunkRenderEntity.Value to destroy
+                // the render entity when the LOD tier changes or the chunk unloads.
+                // Without this store the render entity leaks forever.
+                EntityManager.SetComponentData(r.Entity,
+                    new ChunkRenderEntity { Value = renderEntity });
+            }
+
+            // ── Release TempJob allocations ────────────────────────────────────
             r.Blocks.Dispose();
             r.Vertices.Dispose();
             r.UVs.Dispose();
