@@ -58,6 +58,20 @@ public partial class ClientChunkReceiveSystem : SystemBase
     NativeHashMap<int3, Entity> _coordToEntity;
     EntityQuery _connectionQuery;
 
+    // Reassembly staging for fragmented chunks: coord → partial buffer + tracking.
+    // Full chunks (4096B) exceed NetCode's single-packet RPC limit, so the server
+    // sends them as ChunkDataFragmentRpc pieces; we collect them here until every
+    // fragment for a coord has arrived, then hand the assembled bytes to ReceiveChunk.
+    readonly System.Collections.Generic.Dictionary<int3, ChunkAssembly> _assembling = new();
+
+    sealed class ChunkAssembly
+    {
+        public byte[] Data = new byte[ChunkSettings.VOLUME];
+        public bool[] Got;            // which fragment indices have arrived (dedupe)
+        public int Received;          // count of distinct fragments received
+        public int Expected = -1;     // total fragments, set from the first one seen
+    }
+
     protected override void OnCreate()
     {
         _coordToEntity = new NativeHashMap<int3, Entity>(4096, Allocator.Persistent);
@@ -102,18 +116,26 @@ public partial class ClientChunkReceiveSystem : SystemBase
             ecb.AddComponent<WorldSnapshotRequested>(connectionEntity);
         }
 
-        // ── 2. Receive full chunk payloads (main thread: structural changes) ───
-        foreach (var (data, rpcEntity) in
-            SystemAPI.Query<RefRO<ChunkDataRpc>>()
+        // ── 2. Receive fragmented full chunk payloads ──────────────────────────
+        var completedChunks = new System.Collections.Generic.List<ChunkDataRpc>();
+
+        foreach (var (frag, rpcEntity) in
+            SystemAPI.Query<RefRO<ChunkDataFragmentRpc>>()
                      .WithAll<ReceiveRpcCommandRequest>()
                      .WithEntityAccess())
         {
-            ReceiveChunk(data.ValueRO);
+            AccumulateFragment(frag.ValueRO, completedChunks);
             ecb.DestroyEntity(rpcEntity);
         }
 
         ecb.Playback(EntityManager);
         ecb.Dispose();
+
+        // Now safe: iteration over the RPC query has fully ended.
+        foreach (var rpc in completedChunks)
+        {
+            ReceiveChunk(rpc);
+        }
 
         // ── 3. Receive block-change deltas (Burst job) ─────────────────────────
         var deltaEcb = new EntityCommandBuffer(Allocator.TempJob);
@@ -126,6 +148,44 @@ public partial class ClientChunkReceiveSystem : SystemBase
         Dependency.Complete();
         deltaEcb.Playback(EntityManager);
         deltaEcb.Dispose();
+    }
+
+    // ── Fragment reassembly ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// Scatters one chunk fragment into its staging buffer. Once every fragment
+    /// for a coord has arrived, rebuilds a ChunkDataRpc from the staged bytes and
+    /// routes it through the normal ReceiveChunk path (entity create/refill, slice
+    /// refresh, mark dirty). Fragments may span multiple frames; staging persists
+    /// on the system between frames. Reliable RPC delivery guarantees all arrive.
+    /// </summary>
+    void AccumulateFragment(in ChunkDataFragmentRpc frag,
+     System.Collections.Generic.List<ChunkDataRpc> completed)
+    {
+        if (!_assembling.TryGetValue(frag.Coord, out var asm))
+        {
+            asm = new ChunkAssembly
+            {
+                Expected = frag.FragmentCount,
+                Got = new bool[frag.FragmentCount],
+            };
+            _assembling[frag.Coord] = asm;
+        }
+
+        if (frag.FragmentIndex < asm.Got.Length && !asm.Got[frag.FragmentIndex])
+        {
+            ChunkFragmentCodec.Scatter(frag, asm.Data);
+            asm.Got[frag.FragmentIndex] = true;
+            asm.Received++;
+        }
+
+        if (asm.Received >= asm.Expected)
+        {
+            var rpc = new ChunkDataRpc { Coord = frag.Coord };
+            rpc.FromByteArray(asm.Data);
+            completed.Add(rpc);
+            _assembling.Remove(frag.Coord);
+        }
     }
 
     // ── Full chunk reception ──────────────────────────────────────────────────
@@ -182,6 +242,10 @@ public partial class ClientChunkReceiveSystem : SystemBase
         var ourBlocks = EntityManager.GetBuffer<BlockElement>(entity)
             .AsNativeArray().Reinterpret<byte>();
 
+        // Pass 1: pure reads — no structural changes allowed in here.
+        var pendingSlices = new System.Collections.Generic.List<(ChunkNeighborSlices nns, int dir, byte[] slice)>();
+        var pendingDirty = new System.Collections.Generic.List<Entity>();
+
         for (int dir = 0; dir < 6; dir++)
         {
             int3 neighborCoord = coord + DirOffset(dir);
@@ -196,12 +260,20 @@ public partial class ClientChunkReceiveSystem : SystemBase
             if (EntityManager.HasComponent<ChunkNeighborSlices>(neighbor))
             {
                 var nns = EntityManager.GetComponentObject<ChunkNeighborSlices>(neighbor);
-                SetSlice(nns, dir ^ 1, ExtractBorderSlice(ourBlocks, dir));
+                pendingSlices.Add((nns, dir ^ 1, ExtractBorderSlice(ourBlocks, dir)));
 
                 if (!EntityManager.HasComponent<ChunkDirty>(neighbor))
-                    EntityManager.AddComponent<ChunkDirty>(neighbor);
+                    pendingDirty.Add(neighbor);
             }
         }
+
+        // Pass 2: apply managed-object writes and structural changes now that all
+        // NativeArray reads for this call are finished.
+        foreach (var (nns, dir, slice) in pendingSlices)
+            SetSlice(nns, dir, slice);
+
+        foreach (var neighbor in pendingDirty)
+            EntityManager.AddComponent<ChunkDirty>(neighbor);
     }
 
     // ── Border slice extraction ───────────────────────────────────────────────

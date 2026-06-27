@@ -10,7 +10,7 @@ public partial struct SpectatorMovementSystem : ISystem
     {
         float dt = SystemAPI.Time.DeltaTime;
 
-        foreach (var (input, spectatorState, transform) in
+        foreach ((RefRO<SpectatorInput> input, RefRW<SpectatorState> spectatorState, RefRW<LocalTransform> transform) in
             SystemAPI.Query<RefRO<SpectatorInput>, RefRW<SpectatorState>, RefRW<LocalTransform>>()
                      .WithAll<Simulate>())
         {
