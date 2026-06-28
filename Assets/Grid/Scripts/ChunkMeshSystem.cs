@@ -316,12 +316,31 @@ public partial class ChunkMeshSystem : SystemBase
             });
         }
 
-        foreach (var r in buildResults)
-            EntityManager.RemoveComponent<ChunkDirty>(r.Entity);
+        // NOTE: ChunkDirty is cleared per-chunk at the END of a successful build
+        // below — NOT in a separate pass up front. If one chunk throws mid-loop
+        // and the flags were already stripped, every queued chunk silently loses
+        // its dirty flag and never renders again (this is why a single malformed
+        // chunk made the whole world, seed platform included, disappear).
 
         foreach (var r in buildResults)
         {
             r.Handle.Complete();
+
+            int vCount = r.Vertices.Length;
+            bool uv0Ok = r.UVs.Length == vCount;
+            bool uv1Ok = r.AtlasUVs.Length == vCount;
+
+            // Hard invariant: one uv0 and one uv1 per vertex. If this trips, the
+            // producer (EmitQuad / the job) Added an unequal number of verts vs
+            // uvs. Log the exact chunk + counts and skip the bad channel rather
+            // than letting Mesh.SetUVs throw and take the batch down with it.
+            if (!uv0Ok || !uv1Ok)
+            {
+                Debug.LogError(
+                    $"[ChunkMeshSystem] UV/vertex mismatch at chunk {r.Coord}: " +
+                    $"verts={vCount}, uv0={r.UVs.Length}, uv1={r.AtlasUVs.Length}. " +
+                    "EmitQuad must Add to Vertices, UVs and AtlasUVs the same number of times.");
+            }
 
             Mesh mesh;
             if (r.HasExistingMesh)
@@ -337,8 +356,8 @@ public partial class ChunkMeshSystem : SystemBase
             }
 
             mesh.SetVertices(r.Vertices.AsArray());
-            mesh.SetUVs(0, r.UVs.AsArray());
-            mesh.SetUVs(1, r.AtlasUVs.AsArray());
+            if (uv0Ok) mesh.SetUVs(0, r.UVs.AsArray());
+            if (uv1Ok) mesh.SetUVs(1, r.AtlasUVs.AsArray());
 
             int indexCount = r.Triangles.Length;
             mesh.SetIndexBufferParams(indexCount, IndexFormat.UInt32);
@@ -375,6 +394,9 @@ public partial class ChunkMeshSystem : SystemBase
                 EntityManager.SetSharedComponentManaged(renderEntity, newArray);
                 EntityManager.SetComponentData(r.Entity, new ChunkRenderEntity { Value = renderEntity });
             }
+
+            // Build succeeded for this chunk — now it's safe to clear the flag.
+            EntityManager.RemoveComponent<ChunkDirty>(r.Entity);
 
             r.Blocks.Dispose();
             r.Vertices.Dispose();
