@@ -23,7 +23,12 @@ public struct BuildChunkMeshJob : IJob
     [ReadOnly] public NativeArray<int> BlockFaceAtlas;
 
     public NativeList<float3> Vertices;
+    /// <summary>UV channel 0 — local block coords (0..w, 0..h). Shader fracs
+    /// these to repeat once per block unit, then scales to one atlas tile.</summary>
     public NativeList<float2> UVs;
+    /// <summary>UV channel 1 — atlas tile base (col/16, row/16), same for all
+    /// 4 verts of a quad since they all sample from the same tile.</summary>
+    public NativeList<float2> AtlasUVs;
     public NativeList<int> Triangles;
 
     public void Execute()
@@ -121,17 +126,24 @@ public struct BuildChunkMeshJob : IJob
         Vertices.Add(new float3(c2.x, c2.y, c2.z));
         Vertices.Add(new float3(c3.x, c3.y, c3.z));
 
+        // UV0: local block coordinates across the quad.
+        // (0,0)→c0, (w,0)→c1, (w,h)→c2, (0,h)→c3.
+        // The shader does frac(uv0) to tile once per block unit.
+        UVs.Add(new float2(0, 0));
+        UVs.Add(new float2(w, 0));
+        UVs.Add(new float2(w, h));
+        UVs.Add(new float2(0, h));
+
+        // UV1: atlas tile base — same for all 4 verts.
         const int ATLAS_COLS = 16;
         float tileSize = 1f / ATLAS_COLS;
-        float u0 = (tile % ATLAS_COLS) * tileSize;
-        float v0 = (tile / ATLAS_COLS) * tileSize;
-        float u1 = u0 + tileSize;
-        float v1 = v0 + tileSize;
-
-        UVs.Add(new float2(u0, v0));
-        UVs.Add(new float2(u1, v0));
-        UVs.Add(new float2(u1, v1));
-        UVs.Add(new float2(u0, v1));
+        var atlasBase = new float2(
+            (tile % ATLAS_COLS) * tileSize,
+            (tile / ATLAS_COLS) * tileSize);
+        AtlasUVs.Add(atlasBase);
+        AtlasUVs.Add(atlasBase);
+        AtlasUVs.Add(atlasBase);
+        AtlasUVs.Add(atlasBase);
 
         if (forward)
         {
@@ -175,6 +187,7 @@ struct ChunkBuildResult
     public NativeArray<byte> Blocks;
     public NativeList<float3> Vertices;
     public NativeList<float2> UVs;
+    public NativeList<float2> AtlasUVs;
     public NativeList<int> Triangles;
     public JobHandle Handle;
     public bool HasExistingMesh;
@@ -193,9 +206,6 @@ public partial class ChunkMeshSystem : SystemBase
     protected override void OnCreate()
     {
         if (World.Name != "ClientWorld") { Enabled = false; return; }
-        // Atlas baking deferred to EnsureAtlas() — BlockRegistry may not be
-        // populated yet at OnCreate time due to RuntimeInitializeOnLoadMethod
-        // ordering between the registry loader and ECS world creation.
     }
 
     protected override void OnDestroy()
@@ -203,8 +213,6 @@ public partial class ChunkMeshSystem : SystemBase
         if (_blockFaceAtlas.IsCreated) _blockFaceAtlas.Dispose();
     }
 
-    // Bakes the atlas on the first OnUpdate frame where BlockRegistry is ready.
-    // Returns false if the registry still has no data (skip the frame).
     bool EnsureAtlas()
     {
         if (_blockFaceAtlas.IsCreated) return true;
@@ -215,7 +223,6 @@ public partial class ChunkMeshSystem : SystemBase
         for (int i = 0; i < reg.Length; i++)
             for (int d = 0; d < 6; d++)
                 _blockFaceAtlas[i * 6 + d] = reg[i].ForDirection(d);
-
         return true;
     }
 
@@ -227,12 +234,8 @@ public partial class ChunkMeshSystem : SystemBase
         if (_prototype != Entity.Null) return;
 
         var blankMesh = new Mesh();
-        var desc = new RenderMeshDescription(
-                                  shadowCastingMode: ShadowCastingMode.On,
-                                  receiveShadows: true);
-        var renderMeshArray = new RenderMeshArray(
-                                  new Material[] { _material },
-                                  new Mesh[] { blankMesh });
+        var desc = new RenderMeshDescription(ShadowCastingMode.On, true);
+        var renderMeshArray = new RenderMeshArray(new Material[] { _material }, new Mesh[] { blankMesh });
 
         _prototype = EntityManager.CreateEntity();
         RenderMeshUtility.AddComponents(_prototype, EntityManager, desc,
@@ -275,6 +278,7 @@ public partial class ChunkMeshSystem : SystemBase
 
             var verts = new NativeList<float3>(Allocator.TempJob);
             var uvs = new NativeList<float2>(Allocator.TempJob);
+            var atlasUvs = new NativeList<float2>(Allocator.TempJob);
             var tris = new NativeList<int>(Allocator.TempJob);
 
             var handle = new BuildChunkMeshJob
@@ -289,6 +293,7 @@ public partial class ChunkMeshSystem : SystemBase
                 BlockFaceAtlas = _blockFaceAtlas,
                 Vertices = verts,
                 UVs = uvs,
+                AtlasUVs = atlasUvs,
                 Triangles = tris,
             }.Schedule();
 
@@ -303,6 +308,7 @@ public partial class ChunkMeshSystem : SystemBase
                 Blocks = blocksCopy,
                 Vertices = verts,
                 UVs = uvs,
+                AtlasUVs = atlasUvs,
                 Triangles = tris,
                 Handle = handle,
                 HasExistingMesh = EntityManager.HasComponent<ChunkMeshRef>(entity),
@@ -332,6 +338,7 @@ public partial class ChunkMeshSystem : SystemBase
 
             mesh.SetVertices(r.Vertices.AsArray());
             mesh.SetUVs(0, r.UVs.AsArray());
+            mesh.SetUVs(1, r.AtlasUVs.AsArray());
 
             int indexCount = r.Triangles.Length;
             mesh.SetIndexBufferParams(indexCount, IndexFormat.UInt32);
@@ -363,20 +370,16 @@ public partial class ChunkMeshSystem : SystemBase
                     }
                 });
 
-                var newArray = new RenderMeshArray(
-                    new Material[] { _material },
-                    new Mesh[] { mesh });
-                EntityManager.SetComponentData(renderEntity,
-                    MaterialMeshInfo.FromRenderMeshArrayIndices(0, 0));
+                var newArray = new RenderMeshArray(new Material[] { _material }, new Mesh[] { mesh });
+                EntityManager.SetComponentData(renderEntity, MaterialMeshInfo.FromRenderMeshArrayIndices(0, 0));
                 EntityManager.SetSharedComponentManaged(renderEntity, newArray);
-
-                EntityManager.SetComponentData(r.Entity,
-                    new ChunkRenderEntity { Value = renderEntity });
+                EntityManager.SetComponentData(r.Entity, new ChunkRenderEntity { Value = renderEntity });
             }
 
             r.Blocks.Dispose();
             r.Vertices.Dispose();
             r.UVs.Dispose();
+            r.AtlasUVs.Dispose();
             r.Triangles.Dispose();
         }
     }

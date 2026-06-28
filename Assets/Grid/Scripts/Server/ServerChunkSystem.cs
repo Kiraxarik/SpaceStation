@@ -19,6 +19,10 @@ using Unity.NetCode;
 ///        • existing chunk   → broadcast a BlockChangeRpc delta to all
 ///   3. Server events — same resolution/broadcast for ServerBlockChange.
 ///
+/// After every committed write ApplyPlacement emits a BlockChangedEvent entity.
+/// Consequence systems (power, atmospherics, mass, …) query those events this
+/// frame; BlockChangedEventCleanupSystem destroys them at frame end.
+///
 /// Full chunks (4096 bytes) exceed NetCode's single-packet RPC limit, so they
 /// are split into ChunkDataFragmentRpc pieces and reassembled client-side.
 /// Deltas are tiny and sent as a single RPC.
@@ -85,10 +89,12 @@ public partial class ServerChunkSystem : SystemBase
     // ── Placement resolution + broadcast ──────────────────────────────────────
 
     /// <summary>
-    /// Resolves a global block coordinate to (chunkCoord, localIndex), applies
-    /// the change to the store, and broadcasts the appropriate RPC. If the chunk
-    /// did not exist, it is created and the full chunk is sent (fragmented);
-    /// otherwise only the delta is sent.
+    /// Resolves a global block coordinate to (chunkCoord, localIndex), reads the
+    /// old value, applies the change to the store, broadcasts the appropriate RPC,
+    /// and emits a BlockChangedEvent for consequence systems to react to.
+    ///
+    /// If the chunk did not exist, it is created and the full chunk is sent
+    /// (fragmented); otherwise only the delta is sent.
     /// </summary>
     void ApplyPlacement(int3 worldBlock, byte newValue,
                         NativeArray<Entity> connections, EntityCommandBuffer ecb)
@@ -100,6 +106,9 @@ public partial class ServerChunkSystem : SystemBase
         bool chunkExisted = _store.Has(chunkCoord);
         if (!chunkExisted && newValue == 0)
             return;
+
+        // Read old value before the write so the event carries both.
+        byte oldValue = chunkExisted ? _store.GetBlock(chunkCoord, blockIndex) : (byte)0;
 
         _store.SetBlock(chunkCoord, blockIndex, newValue, out bool created);
 
@@ -120,6 +129,20 @@ public partial class ServerChunkSystem : SystemBase
             };
             BroadcastDelta(connections, rpc, ecb);
         }
+
+        // ── Emit construction event ────────────────────────────────────────────
+        // Consequence systems (power, atmospherics, mass recompute, …) react to
+        // this rather than reading ServerChunkSystem internals directly.
+        var eventEntity = ecb.CreateEntity();
+        ecb.AddComponent(eventEntity, new BlockChangedEvent
+        {
+            WorldBlock = worldBlock,
+            ChunkCoord = chunkCoord,
+            LocalIndex = blockIndex,
+            OldValue = oldValue,
+            NewValue = newValue,
+            IsNewChunk = created,
+        });
     }
 
     // ── Fragmented full-chunk send ────────────────────────────────────────────
@@ -202,6 +225,10 @@ public partial class ServerChunkSystem : SystemBase
         public bool Has(int3 coord) => _chunks.ContainsKey(coord);
 
         public byte[] Get(int3 coord) => _chunks[coord];
+
+        /// <summary>Returns the block value at blockIndex, or 0 if the chunk doesn't exist.</summary>
+        public byte GetBlock(int3 coord, int blockIndex)
+            => _chunks.TryGetValue(coord, out byte[] blocks) ? blocks[blockIndex] : (byte)0;
 
         public System.Collections.Generic.IEnumerable<
             System.Collections.Generic.KeyValuePair<int3, byte[]>> AllChunks() => _chunks;

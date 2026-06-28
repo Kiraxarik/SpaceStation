@@ -52,15 +52,6 @@ partial struct LODRetierJob : IJobEntity
 
 // ── System ────────────────────────────────────────────────────────────────────
 
-/// <summary>
-/// Distance-based LOD retiering for resident chunks.
-/// Does NOT create or stream chunks — that is ServerChunkSystem's job.
-///
-/// Uses the GhostOwnerIsLocal player rather than GetSingletonEntity so it
-/// works correctly in multiplayer playmode where multiple LocalPlayer entities
-/// can exist briefly (one per client world instance, or two in split-screen).
-/// We always pick the first GhostOwnerIsLocal entity found.
-/// </summary>
 [WorldSystemFilter(WorldSystemFilterFlags.ClientSimulation)]
 [UpdateBefore(typeof(ChunkMeshSystem))]
 [UpdateBefore(typeof(ChunkLODMeshSystem))]
@@ -72,10 +63,6 @@ public partial class ChunkLODSystem : SystemBase
 
     protected override void OnCreate()
     {
-        // Query for the locally-owned player ghost specifically.
-        // GhostOwnerIsLocal is only present on the entity that belongs to THIS
-        // client, so even if multiple player ghosts exist in the world (one per
-        // connected player), only one matches here.
         _playerQuery = GetEntityQuery(
             ComponentType.ReadOnly<LocalPlayer>(),
             ComponentType.ReadOnly<LocalTransform>(),
@@ -84,29 +71,25 @@ public partial class ChunkLODSystem : SystemBase
         _lastPlayerChunk = new int3(int.MaxValue, int.MaxValue, int.MaxValue);
 
         RequireForUpdate<ChunkViewDistanceSettings>();
-        // Don't RequireForUpdate on _playerQuery — we handle IsEmpty ourselves.
     }
 
     protected override void OnUpdate()
     {
-        // If no locally-owned player exists yet (connecting, loading), skip.
         if (_playerQuery.IsEmpty) return;
 
         var viewDist = SystemAPI.GetSingleton<ChunkViewDistanceSettings>();
 
-        // Safe even if multiple entities somehow match — takes the first.
-        // GetSingletonEntity() would throw; this doesn't.
-        LocalTransform playerXform = default;
-        foreach (var xform in SystemAPI.Query<RefRO<LocalTransform>>()
-                                       .WithAll<LocalPlayer, GhostOwnerIsLocal>())
-        {
-            playerXform = xform.ValueRO;
-            break;
-        }
+        // GhostOwnerIsLocal is an enableable component — GetSingletonEntity()
+        // throws on queries that contain enableable types. Use ToEntityArray
+        // and take the first result instead.
+        var playerEntities = _playerQuery.ToEntityArray(Allocator.Temp);
+        if (playerEntities.Length == 0) { playerEntities.Dispose(); return; }
+
+        var playerXform = EntityManager.GetComponentData<LocalTransform>(playerEntities[0]);
+        playerEntities.Dispose();
 
         int3 playerChunk = WorldToChunk(playerXform.Position);
 
-        // Only rescan when the player crosses a chunk boundary.
         bool playerMoved = !playerChunk.Equals(_lastPlayerChunk);
         if (!playerMoved && _hasRunOnce) return;
 

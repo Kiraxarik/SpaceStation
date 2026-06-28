@@ -41,6 +41,7 @@ public struct BuildLODMeshJob : IJob
 
     public NativeList<float3> Vertices;
     public NativeList<float2> UVs;
+    public NativeList<float2> AtlasUVs;
     public NativeList<int> Triangles;
 
     public void Execute()
@@ -200,19 +201,15 @@ public struct BuildLODMeshJob : IJob
     }
 
     // ── Quad emission ─────────────────────────────────────────────────────────
+    // ── Quad emission ─────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Emits a quad in the downsampled cell grid. All coordinates are multiplied
-    /// by Factor to convert cell positions back to world-space voxel positions,
-    /// so the LOD mesh aligns exactly with the full-res mesh's block grid.
-    /// </summary>
     void EmitQuad(int3 origin, int w, int h,
                   int axis, int uAxis, int vAxis,
                   int tile, bool forward)
     {
         int vertBase = Vertices.Length;
         int axisBump = forward ? 1 : 0;
-        int f = Factor; // cell → world-space voxel scale
+        int f = Factor;
 
         var c0 = new int3(origin.x, origin.y, origin.z); c0[axis] += axisBump;
         var c1 = c0; c1[uAxis] += w;
@@ -224,14 +221,26 @@ public struct BuildLODMeshJob : IJob
         Vertices.Add(new float3(c2.x * f, c2.y * f, c2.z * f));
         Vertices.Add(new float3(c3.x * f, c3.y * f, c3.z * f));
 
+        // UV0: block-space dimensions (cell units × Factor).
+        // A 2-cell-wide quad at Factor=2 covers 4 blocks → tiles 4×,
+        // matching the density of the full-res mesh.
+        float uw = w * f;
+        float uh = h * f;
+        UVs.Add(new float2(0, 0));
+        UVs.Add(new float2(uw, 0));
+        UVs.Add(new float2(uw, uh));
+        UVs.Add(new float2(0, uh));
+
+        // UV1: atlas tile base — same for all 4 verts.
         const int ATLAS_COLS = 16;
         float tileSize = 1f / ATLAS_COLS;
-        float u0 = (tile % ATLAS_COLS) * tileSize;
-        float v0 = (tile / ATLAS_COLS) * tileSize;
-        UVs.Add(new float2(u0, v0));
-        UVs.Add(new float2(u0 + tileSize, v0));
-        UVs.Add(new float2(u0 + tileSize, v0 + tileSize));
-        UVs.Add(new float2(u0, v0 + tileSize));
+        var atlasBase = new float2(
+            (tile % ATLAS_COLS) * tileSize,
+            (tile / ATLAS_COLS) * tileSize);
+        AtlasUVs.Add(atlasBase);
+        AtlasUVs.Add(atlasBase);
+        AtlasUVs.Add(atlasBase);
+        AtlasUVs.Add(atlasBase);
 
         if (forward)
         {
@@ -260,17 +269,13 @@ struct LODBuildResult
     public NativeArray<byte> Blocks;
     public NativeList<float3> Vertices;
     public NativeList<float2> UVs;
+    public NativeList<float2> AtlasUVs;
     public NativeList<int> Triangles;
     public JobHandle Handle;
     public int Factor;
     public bool HasExistingMesh;
     public Entity ExistingRenderEntity;
 }
-
-// ── System ────────────────────────────────────────────────────────────────────
-// ── LOD build result carrier ──────────────────────────────────────────────────
-
-
 
 // ── System ────────────────────────────────────────────────────────────────────
 
@@ -284,9 +289,6 @@ public partial class ChunkLODMeshSystem : SystemBase
     protected override void OnCreate()
     {
         if (World.Name != "ClientWorld") { Enabled = false; return; }
-        // Atlas baking deferred to EnsureAtlas() — BlockRegistry may not be
-        // populated yet at OnCreate time due to RuntimeInitializeOnLoadMethod
-        // ordering between the registry loader and ECS world creation.
     }
 
     protected override void OnDestroy()
@@ -294,8 +296,6 @@ public partial class ChunkLODMeshSystem : SystemBase
         if (_blockFaceAtlas.IsCreated) _blockFaceAtlas.Dispose();
     }
 
-    // Bakes the atlas on the first OnUpdate frame where BlockRegistry is ready.
-    // Returns false if the registry still has no data (skip the frame).
     bool EnsureAtlas()
     {
         if (_blockFaceAtlas.IsCreated) return true;
@@ -306,7 +306,6 @@ public partial class ChunkLODMeshSystem : SystemBase
         for (int i = 0; i < reg.Length; i++)
             for (int d = 0; d < 6; d++)
                 _blockFaceAtlas[i * 6 + d] = reg[i].ForDirection(d);
-
         return true;
     }
 
@@ -318,12 +317,8 @@ public partial class ChunkLODMeshSystem : SystemBase
         if (_prototype != Entity.Null) return;
 
         var blankMesh = new Mesh();
-        var desc = new RenderMeshDescription(
-                            shadowCastingMode: ShadowCastingMode.On,
-                            receiveShadows: true);
-        var rma = new RenderMeshArray(
-                            new Material[] { _material },
-                            new Mesh[] { blankMesh });
+        var desc = new RenderMeshDescription(ShadowCastingMode.On, true);
+        var rma = new RenderMeshArray(new Material[] { _material }, new Mesh[] { blankMesh });
 
         _prototype = EntityManager.CreateEntity();
         RenderMeshUtility.AddComponents(_prototype, EntityManager, desc, rma,
@@ -355,6 +350,7 @@ public partial class ChunkLODMeshSystem : SystemBase
 
             var verts = new NativeList<float3>(Allocator.TempJob);
             var uvs = new NativeList<float2>(Allocator.TempJob);
+            var atlasUvs = new NativeList<float2>(Allocator.TempJob);
             var tris = new NativeList<int>(Allocator.TempJob);
 
             var handle = new BuildLODMeshJob
@@ -364,6 +360,7 @@ public partial class ChunkLODMeshSystem : SystemBase
                 Factor = factor,
                 Vertices = verts,
                 UVs = uvs,
+                AtlasUVs = atlasUvs,
                 Triangles = tris,
             }.Schedule();
 
@@ -374,6 +371,7 @@ public partial class ChunkLODMeshSystem : SystemBase
                 Blocks = blocksCopy,
                 Vertices = verts,
                 UVs = uvs,
+                AtlasUVs = atlasUvs,
                 Triangles = tris,
                 Handle = handle,
                 Factor = factor,
@@ -404,6 +402,7 @@ public partial class ChunkLODMeshSystem : SystemBase
 
             mesh.SetVertices(r.Vertices.AsArray());
             mesh.SetUVs(0, r.UVs.AsArray());
+            mesh.SetUVs(1, r.AtlasUVs.AsArray());
 
             int indexCount = r.Triangles.Length;
             mesh.SetIndexBufferParams(indexCount, IndexFormat.UInt32);
@@ -435,20 +434,16 @@ public partial class ChunkLODMeshSystem : SystemBase
                     }
                 });
 
-                var newArray = new RenderMeshArray(
-                    new Material[] { _material },
-                    new Mesh[] { mesh });
-                EntityManager.SetComponentData(renderEntity,
-                    MaterialMeshInfo.FromRenderMeshArrayIndices(0, 0));
+                var newArray = new RenderMeshArray(new Material[] { _material }, new Mesh[] { mesh });
+                EntityManager.SetComponentData(renderEntity, MaterialMeshInfo.FromRenderMeshArrayIndices(0, 0));
                 EntityManager.SetSharedComponentManaged(renderEntity, newArray);
-
-                EntityManager.SetComponentData(r.Entity,
-                    new ChunkRenderEntity { Value = renderEntity });
+                EntityManager.SetComponentData(r.Entity, new ChunkRenderEntity { Value = renderEntity });
             }
 
             r.Blocks.Dispose();
             r.Vertices.Dispose();
             r.UVs.Dispose();
+            r.AtlasUVs.Dispose();
             r.Triangles.Dispose();
         }
     }
