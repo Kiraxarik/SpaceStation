@@ -29,10 +29,6 @@ Shader "Custom/VoxelAtlas"
             #pragma vertex   Vert
             #pragma fragment Frag
             #pragma target   4.5
-
-            // Required for Entities Graphics / BatchRendererGroup.
-            // Without this pragma the shader has no DOTS_INSTANCING_ON variant
-            // and BRG refuses to draw with it.
             #pragma multi_compile _ DOTS_INSTANCING_ON
             #pragma instancing_options renderinglayer
 
@@ -76,9 +72,18 @@ Shader "Custom/VoxelAtlas"
 
             float4 Frag(Varyings IN) : SV_Target
             {
-                const float TILE = 1.0 / 16.0;
-                float2 uv  = frac(IN.uv0) * TILE + IN.uv1;
-                float4 col = SAMPLE_TEXTURE2D(_BaseColorMap, sampler_BaseColorMap, uv);
+                const float ATLAS_COLS = 16.0;
+                const float TILE       = 1.0 / ATLAS_COLS;
+
+                // Half-texel inset so interpolation never bleeds into an
+                // adjacent tile at the frac() repeat boundary.
+                // Atlas is 512px wide (16 tiles x 32px) → 1 texel = 1/512.
+                const float HALF_TEXEL = 0.5 / 512.0;
+
+                float2 local = frac(IN.uv0) * TILE;
+                local = clamp(local, HALF_TEXEL, TILE - HALF_TEXEL);
+
+                float4 col = SAMPLE_TEXTURE2D(_BaseColorMap, sampler_BaseColorMap, local + IN.uv1);
 
                 float3 N     = normalize(IN.normalWS);
                 float3 L     = normalize(float3(0.5, 1.0, 0.3));

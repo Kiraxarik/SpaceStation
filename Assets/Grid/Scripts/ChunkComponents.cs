@@ -26,6 +26,9 @@ public static class ChunkSettings
 /// <summary>
 /// Six atlas tile indices, one per face.
 /// Direction order: 0=+Y(top), 1=-Y(bottom), 2=+X, 3=-X, 4=+Z, 5=-Z
+///
+/// Populated at runtime from BlockDefinitionData.tiles by BlockRegistry.
+/// The mesh systems read BlockRegistry.Faces[] which is an array of these.
 /// </summary>
 public struct BlockFaces
 {
@@ -52,15 +55,10 @@ public struct BlockFaces
     };
 }
 
-public static class BlockRegistry
-{
-    public static readonly BlockFaces[] Faces = new BlockFaces[]
-    {
-        BlockFaces.Uniform(0),                          // 0 — air
-        BlockFaces.TopSideBottom(top: 0, side: 1, bottom: 2),  // 1 — floor tile
-        BlockFaces.Uniform(3),                          // 2 — wall panel
-    };
-}
+// Note: BlockRegistry has moved to BlockRegistry.cs and is now loaded at
+// runtime from JSON files in Assets/Resources/Blocks/ and mod folders.
+// BlockRegistry.Faces[] has the same shape and is available before any
+// ECS system runs (initialized via [RuntimeInitializeOnLoadMethod(BeforeSceneLoad)]).
 
 // ── ECS components ────────────────────────────────────────────────────────────
 
@@ -78,19 +76,16 @@ public struct BlockElement : IBufferElementData
 /// <summary>Tag: this chunk's mesh needs rebuilding.</summary>
 public struct ChunkDirty : IComponentData { }
 
-/// <summary>
-/// Stores the current LOD tier of this chunk.
-/// Set by the LOD system; read by both mesh systems.
-/// </summary>
+/// <summary>Current LOD tier. Set by ChunkLODSystem; read by mesh systems.</summary>
 public struct ChunkLODState : IComponentData
 {
     public ChunkLODLevel Level;
 }
 
 /// <summary>
-/// Holds a reference to the render entity spawned for this chunk so it can be
-/// destroyed cleanly when the LOD tier changes or the chunk is unloaded.
-/// Entity.Null means no render entity exists right now.
+/// Reference to the render entity spawned for this chunk.
+/// Entity.Null means no render entity currently exists.
+/// Written by mesh systems; read and cleared by ChunkLODSystem.
 /// </summary>
 public struct ChunkRenderEntity : IComponentData
 {
@@ -98,25 +93,19 @@ public struct ChunkRenderEntity : IComponentData
 }
 
 /// <summary>
-/// Tag: marks the local player entity so the streaming/LOD system can find it.
-/// Add this to whatever entity carries the player's LocalTransform.
+/// Tag: marks the locally-owned player entity so LOD and other systems
+/// can find it without querying all player ghosts.
+/// Added by LocalPlayerTagSystem when GhostOwnerIsLocal is present.
 /// </summary>
 public struct LocalPlayer : IComponentData { }
 
-// NOTE: ChunkBlockUpdate now lives in ChunkNetworkComponents.cs as an
-// IBufferElementData (so multiple same-frame changes to one chunk all survive).
-// The old IComponentData version that used to be here has been removed to
-// avoid a duplicate-type collision.
-
 /// <summary>
-/// Managed component: the six SIZE×SIZE border slices of neighboring chunks
+/// Managed component: the six SIZE×SIZE border slices of neighbouring chunks
 /// used by BuildChunkMeshJob for cross-chunk face culling.
 ///
-/// Defaults to all-AIR. In the placement-driven sparse model a chunk at the
-/// edge of the station has genuinely empty (non-existent) neighbors, so the
-/// outward-facing border faces MUST render against the void. An all-solid
-/// default would hide them and the station would look sealed off. Real
-/// neighbor data overwrites these slices when an adjacent chunk exists.
+/// Defaults to all-AIR so that station edges facing empty space correctly
+/// show their outward faces. Previously all-solid, which was right when every
+/// chunk was guaranteed a neighbour — now the world is sparse.
 /// </summary>
 public class ChunkNeighborSlices : IComponentData
 {
@@ -129,7 +118,7 @@ public class ChunkNeighborSlices : IComponentData
         PosZ = Air(); NegZ = Air();
     }
 
-    // Zero = air (face is shown). A freshly allocated byte[] is already zeroed.
+    // All zeroes = air = face is visible against this neighbour.
     static byte[] Air() => new byte[ChunkSettings.FACE];
 
     public byte[] ForDirection(int dir) => dir switch

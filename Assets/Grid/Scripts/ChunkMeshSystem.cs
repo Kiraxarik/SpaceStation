@@ -14,33 +14,16 @@ using UnityEngine.Rendering;
 public struct BuildChunkMeshJob : IJob
 {
     [ReadOnly] public NativeArray<byte> Blocks;
-
     [ReadOnly] public NativeArray<byte> NeighborPosY;
     [ReadOnly] public NativeArray<byte> NeighborNegY;
     [ReadOnly] public NativeArray<byte> NeighborPosX;
     [ReadOnly] public NativeArray<byte> NeighborNegX;
     [ReadOnly] public NativeArray<byte> NeighborPosZ;
     [ReadOnly] public NativeArray<byte> NeighborNegZ;
-
     [ReadOnly] public NativeArray<int> BlockFaceAtlas;
 
     public NativeList<float3> Vertices;
-
-    /// <summary>
-    /// Channel 0 UVs: local block coordinates (0..w, 0..h) across the merged quad.
-    /// The shader fracs these to repeat 0..1 per block unit, then scales by 1/16
-    /// to sample one tile cell. This is what makes a 3-block-wide wall tile
-    /// correctly rather than stretching one tile across all 3 blocks.
-    /// </summary>
     public NativeList<float2> UVs;
-
-    /// <summary>
-    /// Channel 1 UVs: atlas tile base — the (col/16, row/16) top-left corner of
-    /// the tile in normalised atlas space. Identical for all 4 verts of a quad
-    /// since they all sample from the same tile.
-    /// </summary>
-    public NativeList<float2> AtlasUVs;
-
     public NativeList<int> Triangles;
 
     public void Execute()
@@ -61,7 +44,6 @@ public struct BuildChunkMeshJob : IJob
 
         for (int slice = 0; slice < S; slice++)
         {
-            // Forward face pass
             for (int v = 0; v < S; v++)
                 for (int u = 0; u < S; u++)
                 {
@@ -74,7 +56,6 @@ public struct BuildChunkMeshJob : IJob
                 }
             GreedySweep(mask, slice, axis, uAxis, vAxis, forward: true);
 
-            // Backward face pass
             for (int v = 0; v < S; v++)
                 for (int u = 0; u < S; u++)
                 {
@@ -112,9 +93,7 @@ public struct BuildChunkMeshJob : IJob
                 }
 
                 var origin = new int3();
-                origin[axis] = slice;
-                origin[uAxis] = u;
-                origin[vAxis] = v;
+                origin[axis] = slice; origin[uAxis] = u; origin[vAxis] = v;
                 EmitQuad(origin, w, h, axis, uAxis, vAxis, encoded - 1, forward);
 
                 for (int dv = 0; dv < h; dv++)
@@ -142,24 +121,17 @@ public struct BuildChunkMeshJob : IJob
         Vertices.Add(new float3(c2.x, c2.y, c2.z));
         Vertices.Add(new float3(c3.x, c3.y, c3.z));
 
-        // UV channel 0: local block coordinates across the quad.
-        // (0,0) at c0, (w,0) at c1, (w,h) at c2, (0,h) at c3.
-        // The shader does frac() on these to tile once per block unit.
-        UVs.Add(new float2(0, 0));
-        UVs.Add(new float2(w, 0));
-        UVs.Add(new float2(w, h));
-        UVs.Add(new float2(0, h));
-
-        // UV channel 1: atlas tile base — same for all 4 verts.
         const int ATLAS_COLS = 16;
         float tileSize = 1f / ATLAS_COLS;
-        float au = (tile % ATLAS_COLS) * tileSize;
-        float av = (tile / ATLAS_COLS) * tileSize;
-        var atlasBase = new float2(au, av);
-        AtlasUVs.Add(atlasBase);
-        AtlasUVs.Add(atlasBase);
-        AtlasUVs.Add(atlasBase);
-        AtlasUVs.Add(atlasBase);
+        float u0 = (tile % ATLAS_COLS) * tileSize;
+        float v0 = (tile / ATLAS_COLS) * tileSize;
+        float u1 = u0 + tileSize;
+        float v1 = v0 + tileSize;
+
+        UVs.Add(new float2(u0, v0));
+        UVs.Add(new float2(u1, v0));
+        UVs.Add(new float2(u1, v1));
+        UVs.Add(new float2(u0, v1));
 
         if (forward)
         {
@@ -202,8 +174,7 @@ struct ChunkBuildResult
     public int3 Coord;
     public NativeArray<byte> Blocks;
     public NativeList<float3> Vertices;
-    public NativeList<float2> UVs;        // channel 0: local tiling coords
-    public NativeList<float2> AtlasUVs;   // channel 1: atlas tile base
+    public NativeList<float2> UVs;
     public NativeList<int> Triangles;
     public JobHandle Handle;
     public bool HasExistingMesh;
@@ -222,7 +193,9 @@ public partial class ChunkMeshSystem : SystemBase
     protected override void OnCreate()
     {
         if (World.Name != "ClientWorld") { Enabled = false; return; }
-        BakeBlockFaceAtlas();
+        // Atlas baking deferred to EnsureAtlas() — BlockRegistry may not be
+        // populated yet at OnCreate time due to RuntimeInitializeOnLoadMethod
+        // ordering between the registry loader and ECS world creation.
     }
 
     protected override void OnDestroy()
@@ -230,13 +203,20 @@ public partial class ChunkMeshSystem : SystemBase
         if (_blockFaceAtlas.IsCreated) _blockFaceAtlas.Dispose();
     }
 
-    void BakeBlockFaceAtlas()
+    // Bakes the atlas on the first OnUpdate frame where BlockRegistry is ready.
+    // Returns false if the registry still has no data (skip the frame).
+    bool EnsureAtlas()
     {
+        if (_blockFaceAtlas.IsCreated) return true;
+        if (BlockRegistry.Faces.Length == 0) return false;
+
         var reg = BlockRegistry.Faces;
         _blockFaceAtlas = new NativeArray<int>(reg.Length * 6, Allocator.Persistent);
         for (int i = 0; i < reg.Length; i++)
             for (int d = 0; d < 6; d++)
                 _blockFaceAtlas[i * 6 + d] = reg[i].ForDirection(d);
+
+        return true;
     }
 
     void EnsurePrototype()
@@ -262,9 +242,9 @@ public partial class ChunkMeshSystem : SystemBase
 
     protected override void OnUpdate()
     {
+        if (!EnsureAtlas()) return;
         EnsurePrototype();
 
-        // ── Pass 1: collect & schedule ─────────────────────────────────────────
         var buildResults = new System.Collections.Generic.List<ChunkBuildResult>();
 
         foreach (var (pos, blocks, lod, renderRef, entity) in
@@ -295,7 +275,6 @@ public partial class ChunkMeshSystem : SystemBase
 
             var verts = new NativeList<float3>(Allocator.TempJob);
             var uvs = new NativeList<float2>(Allocator.TempJob);
-            var atlasUvs = new NativeList<float2>(Allocator.TempJob);
             var tris = new NativeList<int>(Allocator.TempJob);
 
             var handle = new BuildChunkMeshJob
@@ -310,7 +289,6 @@ public partial class ChunkMeshSystem : SystemBase
                 BlockFaceAtlas = _blockFaceAtlas,
                 Vertices = verts,
                 UVs = uvs,
-                AtlasUVs = atlasUvs,
                 Triangles = tris,
             }.Schedule();
 
@@ -325,7 +303,6 @@ public partial class ChunkMeshSystem : SystemBase
                 Blocks = blocksCopy,
                 Vertices = verts,
                 UVs = uvs,
-                AtlasUVs = atlasUvs,
                 Triangles = tris,
                 Handle = handle,
                 HasExistingMesh = EntityManager.HasComponent<ChunkMeshRef>(entity),
@@ -333,11 +310,9 @@ public partial class ChunkMeshSystem : SystemBase
             });
         }
 
-        // ── Pass 2: structural changes ─────────────────────────────────────────
         foreach (var r in buildResults)
             EntityManager.RemoveComponent<ChunkDirty>(r.Entity);
 
-        // ── Pass 3: complete, upload, manage render entities ───────────────────
         foreach (var r in buildResults)
         {
             r.Handle.Complete();
@@ -350,14 +325,13 @@ public partial class ChunkMeshSystem : SystemBase
             }
             else
             {
-                mesh = new Mesh { name = $"Chunk {r.Coord}" };
+                mesh = new Mesh { name = $"Chunk {r.Coord.x},{r.Coord.z}" };
                 mesh.indexFormat = IndexFormat.UInt32;
                 EntityManager.AddComponentObject(r.Entity, new ChunkMeshRef { Value = mesh });
             }
 
             mesh.SetVertices(r.Vertices.AsArray());
-            mesh.SetUVs(0, r.UVs.AsArray());        // local tiling coords
-            mesh.SetUVs(1, r.AtlasUVs.AsArray());   // atlas tile base
+            mesh.SetUVs(0, r.UVs.AsArray());
 
             int indexCount = r.Triangles.Length;
             mesh.SetIndexBufferParams(indexCount, IndexFormat.UInt32);
@@ -403,7 +377,6 @@ public partial class ChunkMeshSystem : SystemBase
             r.Blocks.Dispose();
             r.Vertices.Dispose();
             r.UVs.Dispose();
-            r.AtlasUVs.Dispose();
             r.Triangles.Dispose();
         }
     }
