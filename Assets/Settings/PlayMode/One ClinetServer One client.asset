@@ -34,7 +34,7 @@ MonoBehaviour:
     m_InstanceItems:
     - rid: 7941354147995975967
     - rid: 7941354147995975969
-    - rid: 7941354147995975973
+    - rid: 7941354147995975976
   references:
     version: 2
     RefIds:
@@ -64,12 +64,12 @@ MonoBehaviour:
           StreamLogsToMainEditor: 0
           LogsColor: {r: 0.3643, g: 0.581, b: 0.8679, a: 1}
         m_Decorators: []
-    - rid: 7941354147995975973
+    - rid: 7941354147995975976
       type: {class: 'InstanceItem`2[[Unity.Multiplayer.PlayMode.Editor.LocalPlayerController, UnityEditor.MultiplayerModule],[Unity.Multiplayer.PlayMode.Editor.LocalPlayerController/InstanceSettings, UnityEditor.MultiplayerModule]]', ns: Unity.Multiplayer.PlayMode.Editor, asm: UnityEditor.MultiplayerModule}
       data:
         m_Id: 902d9d484f304971b190141c6ec34464
         m_Name: Instance
-        m_RunMode: 0
+        m_RunMode: 1
         m_Settings:
           BuildProfile: {fileID: 11400000, guid: 0e6f92216b59fdf4bb427b8aedfe2d28, type: 2}
           StreamLogsToMainEditor: 0

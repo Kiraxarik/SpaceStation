@@ -2,20 +2,11 @@ using Unity.Burst;
 using Unity.Collections;
 using Unity.Entities;
 using Unity.Mathematics;
+using Unity.NetCode;
 using Unity.Transforms;
 
 // ── Burst job: LOD transition pass ───────────────────────────────────────────
 
-/// <summary>
-/// For every chunk entity, computes its target LOD tier from Chebyshev distance
-/// to the player. When the tier changes, updates ChunkLODState and clears the
-/// render-entity reference in place, recording which render entities to destroy
-/// and which chunks to mark dirty for remeshing.
-///
-/// Pure blittable math — fully Burst compiled. Writes two output NativeLists, so
-/// it runs single-threaded (.Run); convert to ParallelWriter if profiling shows
-/// the per-chunk scan is a bottleneck at very high chunk counts.
-/// </summary>
 [BurstCompile]
 partial struct LODRetierJob : IJobEntity
 {
@@ -40,15 +31,12 @@ partial struct LODRetierJob : IJobEntity
         lodState.Level = target;
         renderRef.Value = Entity.Null;
 
-        // Unloaded chunks keep their cached block buffer but build no mesh.
         if (target != ChunkLODLevel.Unloaded)
             ToMarkDirty.Add(entity);
     }
 
     static ChunkLODLevel ComputeTarget(int3 coord, int3 player, ChunkViewDistanceSettings s)
     {
-        // Full 3D Chebyshev distance — Y matters now that the station extends
-        // on all axes (unlike the old flat-grid X/Z-only version).
         int d = math.max(
                     math.abs(coord.x - player.x),
                     math.max(math.abs(coord.y - player.y),
@@ -65,17 +53,13 @@ partial struct LODRetierJob : IJobEntity
 // ── System ────────────────────────────────────────────────────────────────────
 
 /// <summary>
-/// Distance-based LOD retiering for chunks that already exist.
+/// Distance-based LOD retiering for resident chunks.
+/// Does NOT create or stream chunks — that is ServerChunkSystem's job.
 ///
-/// This system does NOT create, destroy, or stream chunks — the server is the
-/// sole authority on which chunks exist (see ServerChunkSystem /
-/// ClientChunkReceiveSystem). All this does is adjust the LOD tier of resident
-/// chunks as the player moves, and destroy render entities whose tier changed
-/// so the mesh systems rebuild them at the new detail level.
-///
-/// Runs before the mesh systems so LOD state is settled before meshing. Skips
-/// the whole per-chunk scan on frames where the player hasn't crossed a chunk
-/// boundary, since tiers can only change when the player's chunk coord changes.
+/// Uses the GhostOwnerIsLocal player rather than GetSingletonEntity so it
+/// works correctly in multiplayer playmode where multiple LocalPlayer entities
+/// can exist briefly (one per client world instance, or two in split-screen).
+/// We always pick the first GhostOwnerIsLocal entity found.
 /// </summary>
 [WorldSystemFilter(WorldSystemFilterFlags.ClientSimulation)]
 [UpdateBefore(typeof(ChunkMeshSystem))]
@@ -88,24 +72,41 @@ public partial class ChunkLODSystem : SystemBase
 
     protected override void OnCreate()
     {
+        // Query for the locally-owned player ghost specifically.
+        // GhostOwnerIsLocal is only present on the entity that belongs to THIS
+        // client, so even if multiple player ghosts exist in the world (one per
+        // connected player), only one matches here.
         _playerQuery = GetEntityQuery(
             ComponentType.ReadOnly<LocalPlayer>(),
-            ComponentType.ReadOnly<LocalTransform>());
+            ComponentType.ReadOnly<LocalTransform>(),
+            ComponentType.ReadOnly<GhostOwnerIsLocal>());
 
         _lastPlayerChunk = new int3(int.MaxValue, int.MaxValue, int.MaxValue);
 
-        RequireForUpdate(_playerQuery);
         RequireForUpdate<ChunkViewDistanceSettings>();
+        // Don't RequireForUpdate on _playerQuery — we handle IsEmpty ourselves.
     }
 
     protected override void OnUpdate()
     {
+        // If no locally-owned player exists yet (connecting, loading), skip.
+        if (_playerQuery.IsEmpty) return;
+
         var viewDist = SystemAPI.GetSingleton<ChunkViewDistanceSettings>();
-        var playerXform = EntityManager.GetComponentData<LocalTransform>(
-                              _playerQuery.GetSingletonEntity());
+
+        // Safe even if multiple entities somehow match — takes the first.
+        // GetSingletonEntity() would throw; this doesn't.
+        LocalTransform playerXform = default;
+        foreach (var xform in SystemAPI.Query<RefRO<LocalTransform>>()
+                                       .WithAll<LocalPlayer, GhostOwnerIsLocal>())
+        {
+            playerXform = xform.ValueRO;
+            break;
+        }
+
         int3 playerChunk = WorldToChunk(playerXform.Position);
 
-        // Tiers only change when the player's chunk coord changes (or first run).
+        // Only rescan when the player crosses a chunk boundary.
         bool playerMoved = !playerChunk.Equals(_lastPlayerChunk);
         if (!playerMoved && _hasRunOnce) return;
 
