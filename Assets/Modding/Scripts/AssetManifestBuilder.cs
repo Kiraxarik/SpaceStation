@@ -48,6 +48,7 @@ public static class AssetManifestBuilder
         Add(Path.Combine(pkg.Directory, "blocks.json"));
         Add(Path.Combine(pkg.Directory, "models.json"));
         Add(Path.Combine(pkg.Directory, "sounds.json"));
+        Add(Path.Combine(pkg.Directory, "tiles.json"));
 
         // Referenced assets for this mod's model + sound content.
         foreach (var m in ModelRegistry.All)
@@ -57,6 +58,10 @@ public static class AssetManifestBuilder
         foreach (var s in SoundRegistry.All)
             if (string.Equals(s.SourceMod, pkg.Id, StringComparison.Ordinal))
                 foreach (var f in s.AssetFiles) Add(f);
+
+        foreach (var t in TileRegistry.All)
+            if (string.Equals(t.SourceMod, pkg.Id, StringComparison.Ordinal))
+                foreach (var f in t.AssetFiles) Add(f);
 
         // Hash each (already sorted by relative path via SortedDictionary).
         var entry = new ModAssetEntry { ModId = pkg.Id, Version = pkg.Version.ToString() };

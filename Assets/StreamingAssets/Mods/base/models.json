@@ -5,7 +5,7 @@
             "type": "prop",
             "display_name": "Debug Cube",
             "geometry": "models/debug_cube.geo.json",
-            "textures": [ "textures/debug_cube.png" ],
+            "textures": [ "textures/models/debug_cube.png" ],
             "animations": []
         }
     ]

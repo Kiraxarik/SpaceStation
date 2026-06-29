@@ -1,0 +1,8 @@
+{
+    "tiles": [
+        { "id": "floor_top",    "texture": "textures/tiles/floor_top.png" },
+        { "id": "floor_bottom", "texture": "textures/tiles/floor_bottom.png" },
+        { "id": "floor_side",   "texture": "textures/tiles/floor_side.png" },
+        { "id": "wall",         "texture": "textures/tiles/wall.png" }
+    ]
+}

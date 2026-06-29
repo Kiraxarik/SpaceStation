@@ -19,7 +19,7 @@ using UnityEngine;
 /// (BlockRegistry.InitializeFromManifest) and diffs asset hashes to find downloads.
 ///
 /// The base game is mod "base" (a StreamingAssets/Mods/base/ folder with mod.json +
-/// blocks.json + models.json + sounds.json) — it loads through exactly this path.
+/// blocks.json + models.json + sounds.json + tiles.json) — it loads through exactly this path.
 /// </summary>
 public static class ContentBootstrap
 {
@@ -39,17 +39,20 @@ public static class ContentBootstrap
         var allBlocks = new List<BlockDefinitionData>();
         var allModels = new List<ModelContent>();
         var allSounds = new List<SoundContent>();
+        var allTiles = new List<TileContent>();
 
         foreach (var pkg in resolution.Order)
         {
             allBlocks.AddRange(BlockContentLoader.LoadFromMod(pkg.Directory, pkg.Id));
             allModels.AddRange(ModelContentLoader.LoadFromMod(pkg.Directory, pkg.Id));
             allSounds.AddRange(SoundContentLoader.LoadFromMod(pkg.Directory, pkg.Id));
+            allTiles.AddRange(TileContentLoader.LoadFromMod(pkg.Directory, pkg.Id));
         }
 
         BlockRegistry.BuildLocal(allBlocks);
         ModelRegistry.Initialize(allModels);
         SoundRegistry.Initialize(allSounds);
+        TileRegistry.Initialize(allTiles);
 
         // Hash the loaded content for the integrity / distribution handshake.
         // Built after the registries so referenced asset files are known.
