@@ -1,0 +1,12 @@
+{
+    "models": [
+        {
+            "id": "debug_cube",
+            "type": "prop",
+            "display_name": "Debug Cube",
+            "geometry": "models/debug_cube.geo.json",
+            "textures": [ "textures/debug_cube.png" ],
+            "animations": []
+        }
+    ]
+}
