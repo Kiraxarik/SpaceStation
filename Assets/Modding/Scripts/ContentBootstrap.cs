@@ -10,22 +10,24 @@ using UnityEngine;
 ///      precedence is determined by declared dependencies, not filesystem order.
 ///   3. Builds BlockRegistry (dense tile ids), ModelRegistry and SoundRegistry
 ///      (sparse asset content).
+///   4. Builds the AssetManifest (per-file + per-mod hashes) for the integrity /
+///      distribution handshake.
 ///
-/// Both registries are built from the locally-resolved set on every process. The
-/// server's set is authoritative; a connecting client re-numbers its blocks against
-/// the server manifest at handshake (BlockRegistry.InitializeFromManifest).
+/// Both registries and the asset manifest are built from the locally-resolved set
+/// on every process. The server's set is authoritative; a connecting client
+/// re-numbers its blocks against the server manifest at handshake
+/// (BlockRegistry.InitializeFromManifest) and diffs asset hashes to find downloads.
 ///
 /// The base game is mod "base" (a StreamingAssets/Mods/base/ folder with mod.json +
-/// blocks.json + models.json + sounds.json) — it loads through exactly this path,
-/// no special case.
+/// blocks.json + models.json + sounds.json) — it loads through exactly this path.
 /// </summary>
 public static class ContentBootstrap
 {
-    /// <summary>
-    /// The most recent mod resolution. Exposed so a later server policy system can
-    /// inspect Errors and refuse connections when required content failed to load.
-    /// </summary>
+    /// <summary>Most recent mod resolution (load order + diagnostics).</summary>
     public static ModResolution LastResolution { get; private set; }
+
+    /// <summary>Hash manifest of all loaded content, for the distribution handshake.</summary>
+    public static AssetManifest AssetManifest { get; private set; }
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
     static void Boot()
@@ -34,7 +36,6 @@ public static class ContentBootstrap
         LastResolution = resolution;
 
         // Load content from every cleanly-resolved mod, in dependency order.
-        // (resolution.Order already excludes mods that failed to resolve.)
         var allBlocks = new List<BlockDefinitionData>();
         var allModels = new List<ModelContent>();
         var allSounds = new List<SoundContent>();
@@ -50,8 +51,22 @@ public static class ContentBootstrap
         ModelRegistry.Initialize(allModels);
         SoundRegistry.Initialize(allSounds);
 
+        // Hash the loaded content for the integrity / distribution handshake.
+        // Built after the registries so referenced asset files are known.
+        AssetManifest = AssetManifestBuilder.Build(resolution);
+        LogAssetManifest(AssetManifest);
+
         if (resolution.Order.Count == 0)
             Debug.LogError("[ContentBootstrap] No mods loaded. Is StreamingAssets/Mods/base/ present " +
                            "with a mod.json? The world will have no content beyond air.");
     }
+
+    static void LogAssetManifest(AssetManifest manifest)
+    {
+        foreach (var mod in manifest.Mods)
+            Debug.Log($"[ContentBootstrap] Asset hash — {mod.ModId} {mod.Version}: " +
+                      $"{mod.Files.Count} file(s), mod hash {Short(mod.ModHash)}.");
+    }
+
+    static string Short(string hash) => string.IsNullOrEmpty(hash) ? "?" : hash.Substring(0, System.Math.Min(8, hash.Length));
 }
