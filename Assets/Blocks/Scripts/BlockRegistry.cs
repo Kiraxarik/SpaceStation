@@ -1,46 +1,67 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
+using System.Linq;
 using UnityEngine;
 
 /// <summary>
-/// Runtime block registry. Initialized via BlockRegistryConfig before any
-/// scene or ECS world is created.
+/// Runtime block registry — the lookup surface the rest of the game reads from
+/// (Faces[], Definitions, GetId, …). Its public shape is unchanged, so the mesh
+/// systems and interaction code are untouched.
 ///
-/// Base game blocks come from the TextAsset assigned in BlockRegistryConfig.
-/// Mod blocks come from StreamingAssets/Mods/*/blocks.json at runtime.
+/// What changed: the registry no longer parses files or reads authored numeric
+/// ids itself. It composes the two separated tasks instead:
+///   Task A  BlockContentLoader.LoadAll  → definitions keyed by namespaced id
+///   Task B  ContentManifest.Build       → deterministic string id → byte id map
+/// then indexes its tables by the manifest's numeric ids.
+///
+/// Numeric ids are now ASSIGNED, never authored (architecture §1.5). Initialize()
+/// derives the assignment locally and deterministically — correct for the server,
+/// and correct for the client as long as content matches. When content can differ
+/// (real mods), the client will instead call InitializeFromManifest() with the
+/// server's authoritative ordering (Module 4); everything below already supports
+/// that — only the source of the ordering changes.
 /// </summary>
 public static class BlockRegistry
 {
-    // ── Public API ────────────────────────────────────────────────────────────
+    // ── Public API (unchanged contract) ───────────────────────────────────────
 
-    /// <summary>
-    /// Indexed by byte block value. Faces[id].ForDirection(dir) → atlas tile.
-    /// Same contract as the old hardcoded array — mesh systems are unchanged.
-    /// </summary>
+    /// <summary>Indexed by byte block value. Faces[id].ForDirection(dir) → atlas tile.</summary>
     public static BlockFaces[] Faces { get; private set; } = Array.Empty<BlockFaces>();
 
-    /// <summary>Maps stable string id ("wall_panel") → runtime byte id.</summary>
+    /// <summary>Maps stable string id ("base:wall_panel") → session byte id.</summary>
     public static IReadOnlyDictionary<string, byte> IdByName { get; private set; }
         = new Dictionary<string, byte>();
 
-    /// <summary>
-    /// Maps runtime byte id → stable string id.
-    /// Use when writing world saves so saves aren't tied to numeric ids.
-    /// </summary>
+    /// <summary>Maps session byte id → stable string id. Use this when writing saves.</summary>
     public static IReadOnlyDictionary<byte, string> NameById { get; private set; }
         = new Dictionary<byte, string>();
 
-    /// <summary>
-    /// Full definitions including simulation properties (solid, atmos_passable,
-    /// conductivity) for Phase 3 systems.
-    /// </summary>
+    /// <summary>Full definitions (sim properties) for Phase 3 systems.</summary>
     public static IReadOnlyDictionary<byte, BlockDefinitionData> Definitions { get; private set; }
         = new Dictionary<byte, BlockDefinitionData>();
 
-    /// <summary>Returns the byte id for a named block, or 0 (air) if not found.</summary>
+    /// <summary>
+    /// The session manifest (string id ↔ byte id ordering) this registry was
+    /// built from. Module 4 serializes Manifest.Order across the handshake.
+    /// </summary>
+    public static ContentManifest Manifest { get; private set; }
+
+    /// <summary>
+    /// Returns the byte id for a block, or 0 (air) if not found. Accepts a fully
+    /// namespaced id ("base:floor_tile") or a bare name ("floor_tile"), which is
+    /// resolved against the base namespace for convenience so game code needn't
+    /// hardcode the "base:" prefix everywhere.
+    /// </summary>
     public static byte GetId(string blockName)
-        => IdByName.TryGetValue(blockName, out byte id) ? id : (byte)0;
+    {
+        if (IdByName.TryGetValue(blockName, out byte id)) return id;
+
+        if (!blockName.Contains(':') &&
+            IdByName.TryGetValue($"{BlockContentLoader.BaseNamespace}:{blockName}", out id))
+            return id;
+
+        return 0;
+    }
 
     /// <summary>Returns the definition for a byte id, or null if unregistered.</summary>
     public static BlockDefinitionData GetDefinition(byte id)
@@ -49,131 +70,86 @@ public static class BlockRegistry
     // ── Initialisation ────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Called by BlockRegistryConfig.AutoLoad() before any scene loads.
-    /// Not intended to be called manually.
+    /// Loads local content and numbers it with a locally-derived deterministic
+    /// manifest. Called by BlockRegistryConfig.AutoLoad() before any scene loads.
     /// </summary>
     public static void Initialize(BlockRegistryConfig config)
     {
-        var definitions = new List<BlockDefinitionData>();
-        int modCount = 0;
+        var defs = BlockContentLoader.LoadAll(config);                 // Task A
+        var manifest = ContentManifest.Build(defs.Select(d => d.id));  // Task B (local authority)
+        PopulateFrom(manifest, defs);
+    }
 
-        // ── 1. Base game blocks ────────────────────────────────────────────────
-        if (config.BaseBlocksFile != null)
+    /// <summary>
+    /// Loads local content but numbers it with an externally-provided ordering —
+    /// the server's authoritative manifest. Used by the client post-handshake
+    /// (Module 4). Local definitions supply the DATA (faces, sim props); the
+    /// server supplies the IDENTITY ordering. A manifest entry with no matching
+    /// local definition keeps default faces until its asset arrives (Module 5).
+    /// </summary>
+    public static void InitializeFromManifest(IReadOnlyList<string> serverOrder, BlockRegistryConfig config)
+    {
+        var defs = BlockContentLoader.LoadAll(config);                 // Task A
+        var manifest = ContentManifest.BuildFromOrder(serverOrder);    // Task B (server authority)
+        PopulateFrom(manifest, defs);
+    }
+
+    // ── Table population ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Builds the runtime lookup tables from a manifest (the numbering) plus the
+    /// loaded definitions (the data). Indexed strictly by the manifest's numeric
+    /// ids so Faces[]/Definitions agree with whatever ordering was chosen.
+    /// </summary>
+    static void PopulateFrom(ContentManifest manifest, List<BlockDefinitionData> defs)
+    {
+        // Resolve duplicates by string id here: later definition wins (load order).
+        var defByName = new Dictionary<string, BlockDefinitionData>(defs.Count, StringComparer.Ordinal);
+        foreach (var d in defs)
         {
-            List<BlockDefinitionData> parsed = ParseJson(
-                config.BaseBlocksFile.text,
-                config.BaseBlocksFile.name);
-            definitions.AddRange(parsed);
-            Debug.Log($"[BlockRegistry] Base: {parsed.Count} block(s) from '{config.BaseBlocksFile.name}'.");
-        }
-        else
-        {
-            Debug.LogError("[BlockRegistry] No Base Blocks File assigned in BlockRegistryConfig. " +
-                           "Drag your blocks.json into the field in the Inspector.");
+            if (defByName.ContainsKey(d.id))
+                Debug.LogWarning($"[BlockRegistry] Duplicate content id '{d.id}' — later definition wins.");
+            defByName[d.id] = d;
         }
 
-        // ── 2. Mod blocks (StreamingAssets/Mods/*/blocks.json) ────────────────
-        string modsRoot = Path.Combine(Application.streamingAssetsPath, "Mods");
-        if (Directory.Exists(modsRoot))
+        int count = manifest.Count;
+        var faces = new BlockFaces[count];
+        var idByName = new Dictionary<string, byte>(count, StringComparer.Ordinal);
+        var nameById = new Dictionary<byte, string>(count);
+        var defsByByte = new Dictionary<byte, BlockDefinitionData>(count);
+
+        int missingData = 0;
+
+        for (int i = 0; i < count; i++)
         {
-            foreach (string modDir in Directory.EnumerateDirectories(modsRoot))
+            byte id = (byte)i;
+            string name = manifest.NameOf(id);
+
+            idByName[name] = id;
+            nameById[id] = name;
+
+            if (defByName.TryGetValue(name, out var def))
             {
-                string modName = Path.GetFileName(modDir);
-                string modFile = Path.Combine(modDir, "blocks.json");
-                if (!File.Exists(modFile)) continue;
-
-                try
-                {
-                    List<BlockDefinitionData> parsed = ParseJson(
-                        File.ReadAllText(modFile),
-                        $"{modName}/blocks.json");
-                    definitions.AddRange(parsed);
-                    modCount += parsed.Count;
-                    Debug.Log($"[BlockRegistry] Mod '{modName}': {parsed.Count} block(s).");
-                }
-                catch (Exception e)
-                {
-                    Debug.LogError($"[BlockRegistry] Failed to load mod '{modName}': {e.Message}");
-                }
+                faces[id] = def.tiles.ToBlockFaces();
+                defsByByte[id] = def;
             }
-        }
-
-        // ── 3. Build lookup tables ─────────────────────────────────────────────
-        definitions.Sort((a, b) => a.numeric_id.CompareTo(b.numeric_id));
-
-        int maxId = 0;
-        foreach (var def in definitions)
-            maxId = Math.Max(maxId, def.numeric_id);
-
-        var faces = new BlockFaces[maxId + 1];
-        var idByName = new Dictionary<string, byte>(definitions.Count);
-        var nameById = new Dictionary<byte, string>(definitions.Count);
-        var defsByByte = new Dictionary<byte, BlockDefinitionData>(definitions.Count);
-
-        foreach (BlockDefinitionData def in definitions)
-        {
-            if (def.numeric_id < 0 || def.numeric_id > 255)
+            else if (id != ContentManifest.AirId)
             {
-                Debug.LogError($"[BlockRegistry] '{def.id}' numeric_id {def.numeric_id} " +
-                               "is outside byte range 0-255. Skipping.");
-                continue;
+                // Air legitimately may carry no faces; anything else missing here
+                // means the manifest references content we have no local data for.
+                missingData++;
             }
-
-            byte byteId = (byte)def.numeric_id;
-
-            if (idByName.ContainsKey(def.id))
-                Debug.LogWarning($"[BlockRegistry] Duplicate id '{def.id}' — " +
-                                 $"overriding with numeric_id {byteId}.");
-
-            faces[byteId] = def.tiles.ToBlockFaces();
-            idByName[def.id] = byteId;
-            nameById[byteId] = def.id;
-            defsByByte[byteId] = def;
         }
 
         Faces = faces;
         IdByName = idByName;
         NameById = nameById;
         Definitions = defsByByte;
+        Manifest = manifest;
 
-        int baseCount = definitions.Count - modCount;
-        Debug.Log($"[BlockRegistry] Ready — {baseCount} base + {modCount} mod " +
-                  $"= {definitions.Count} block(s). Highest id: {maxId}.");
-    }
-
-    // ── JSON parsing ──────────────────────────────────────────────────────────
-
-    [Serializable]
-    class BlocksFile
-    {
-        public BlockDefinitionData[] blocks = Array.Empty<BlockDefinitionData>();
-    }
-
-    static List<BlockDefinitionData> ParseJson(string json, string sourceName)
-    {
-        var result = new List<BlockDefinitionData>();
-        try
-        {
-            var file = JsonUtility.FromJson<BlocksFile>(json);
-            if (file?.blocks == null)
-            {
-                Debug.LogWarning($"[BlockRegistry] '{sourceName}' is empty or malformed.");
-                return result;
-            }
-            foreach (var def in file.blocks)
-            {
-                if (string.IsNullOrWhiteSpace(def?.id))
-                {
-                    Debug.LogWarning($"[BlockRegistry] Entry in '{sourceName}' has no id. Skipping.");
-                    continue;
-                }
-                result.Add(def);
-            }
-        }
-        catch (Exception e)
-        {
-            Debug.LogError($"[BlockRegistry] Failed to parse '{sourceName}': {e.Message}");
-        }
-        return result;
+        string missingNote = missingData > 0
+            ? $" ({missingData} id(s) have no local data yet — awaiting asset sync)"
+            : "";
+        Debug.Log($"[BlockRegistry] Ready — {count} tile id(s) incl. air. Highest id {count - 1}{missingNote}.");
     }
 }

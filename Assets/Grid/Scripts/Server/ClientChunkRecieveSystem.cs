@@ -57,6 +57,7 @@ public partial class ClientChunkReceiveSystem : SystemBase
 {
     NativeHashMap<int3, Entity> _coordToEntity;
     EntityQuery _connectionQuery;
+    EntityQuery _manifestReadyQuery;
 
     // Reassembly staging for fragmented chunks: coord → partial buffer + tracking.
     // Full chunks (4096B) exceed NetCode's single-packet RPC limit, so the server
@@ -86,6 +87,12 @@ public partial class ClientChunkReceiveSystem : SystemBase
             ComponentType.ReadOnly<NetworkId>(),
             ComponentType.ReadOnly<NetworkStreamInGame>());
 
+        // Reception is gated until the server content manifest has been adopted,
+        // so no server-numbered block bytes are processed under the wrong numbering.
+        _manifestReadyQuery = GetEntityQuery(
+            ComponentType.ReadOnly<ContentManifestReady>(),
+            ComponentType.ReadOnly<NetworkStreamInGame>());
+
         RequireForUpdate<NetworkStreamInGame>();
     }
 
@@ -96,6 +103,13 @@ public partial class ClientChunkReceiveSystem : SystemBase
 
     protected override void OnUpdate()
     {
+        // ── 0. Gate on the content manifest ────────────────────────────────────
+        // Do nothing — neither request the world nor process any incoming chunk
+        // data — until the server manifest has been adopted (ContentManifestReady).
+        // Unprocessed RPCs persist as entities and are handled once ready.
+        if (_manifestReadyQuery.IsEmpty)
+            return;
+
         var ecb = new EntityCommandBuffer(Allocator.Temp);
 
         // ── 1. Send the one-time world snapshot request ────────────────────────

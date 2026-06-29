@@ -3,43 +3,41 @@ using UnityEngine;
 
 /// <summary>
 /// JSON-serializable definition for one block type.
-/// One file per block in Assets/Resources/Blocks/ (base game) or
-/// StreamingAssets/Mods/YourMod/Blocks/ (mods).
 ///
-/// Example — wall_panel.json:
+/// Authored in the base game's blocks.json or a mod's
+/// StreamingAssets/Mods/&lt;mod&gt;/blocks.json.
+///
+/// Example — wall_panel entry:
 /// {
-///     "id":          "wall_panel",
-///     "numeric_id":  2,
-///     "tiles":       { "all": 3 },
-///     "solid":       true,
+///     "id":            "wall_panel",
+///     "tiles":         { "all": 3 },
+///     "solid":         true,
 ///     "atmos_passable": false
 /// }
 ///
-/// Mods should use numeric_ids >= 128 to avoid conflicts with base game blocks.
+/// Note there is NO numeric id here. Numeric (byte) ids are assigned at load by
+/// the content manifest (architecture §1.5), never authored — that is what frees
+/// mods from hand-coordinating id ranges. The authored "id" is namespaced by its
+/// source at load ("wall_panel" → "base:wall_panel"), and that namespaced string
+/// is the stable canonical identity used by saves and the manifest.
 /// </summary>
 [Serializable]
 public class BlockDefinitionData
 {
     /// <summary>
-    /// Unique string identifier. Referenced by save files and mod code.
-    /// Never changes between versions — the numeric_id can be remapped but
-    /// this string is the stable canonical name.
+    /// Bare, unique-within-source string identifier ("wall_panel"). The loader
+    /// prefixes it with the source namespace to form the canonical id
+    /// ("base:wall_panel"). An id that already contains ':' is left as authored,
+    /// which lets a mod deliberately target base content.
     /// </summary>
     public string id = "";
-
-    /// <summary>
-    /// Runtime byte value stored in DynamicBuffer&lt;BlockElement&gt;.
-    /// 0 is always air. Max 255 (byte range).
-    /// The mesh systems index BlockRegistry.Faces[] with this value.
-    /// </summary>
-    public int numeric_id = 0;
 
     /// <summary>Which atlas tiles to use on each face.</summary>
     public BlockTileData tiles = new BlockTileData();
 
     // ── Future simulation properties ───────────────────────────────────────
-    // These don't affect rendering now but are here so mods can define them
-    // and Phase 3 systems (atmospherics, power) can read them from the registry.
+    // Don't affect rendering now; here so mods can define them and Phase 3
+    // systems (atmospherics, power) can read them from the registry.
 
     /// <summary>True if this block stops movement and pathfinding.</summary>
     public bool solid = true;
