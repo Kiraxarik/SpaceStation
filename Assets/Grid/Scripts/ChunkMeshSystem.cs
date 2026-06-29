@@ -134,16 +134,14 @@ public struct BuildChunkMeshJob : IJob
         UVs.Add(new float2(w, h));
         UVs.Add(new float2(0, h));
 
-        // UV1: atlas tile base — same for all 4 verts.
-        const int ATLAS_COLS = 16;
-        float tileSize = 1f / ATLAS_COLS;
-        var atlasBase = new float2(
-            (tile % ATLAS_COLS) * tileSize,
-            (tile / ATLAS_COLS) * tileSize);
-        AtlasUVs.Add(atlasBase);
-        AtlasUVs.Add(atlasBase);
-        AtlasUVs.Add(atlasBase);
-        AtlasUVs.Add(atlasBase);
+        // UV1.x: Texture2DArray slice index — same for all 4 verts.
+        // (UV0 stays local block coords; the shader samples float3(uv0, slice)
+        //  with the array's Repeat wrap doing the per-block tiling.)
+        var sliceUV = new float2(tile, 0f);
+        AtlasUVs.Add(sliceUV);
+        AtlasUVs.Add(sliceUV);
+        AtlasUVs.Add(sliceUV);
+        AtlasUVs.Add(sliceUV);
 
         if (forward)
         {
@@ -217,19 +215,27 @@ public partial class ChunkMeshSystem : SystemBase
     {
         if (_blockFaceAtlas.IsCreated) return true;
         if (BlockRegistry.Faces.Length == 0) return false;
+        if (!TileAtlasBaker.EnsureBaked()) return false;
 
+        // Resolve each block face's tile id to its Texture2DArray slice once, into
+        // a flat int[] the Burst job reads. (Job is unchanged: the int it reads is
+        // now a slice index instead of an old-atlas tile index.)
         var reg = BlockRegistry.Faces;
         _blockFaceAtlas = new NativeArray<int>(reg.Length * 6, Allocator.Persistent);
         for (int i = 0; i < reg.Length; i++)
             for (int d = 0; d < 6; d++)
-                _blockFaceAtlas[i * 6 + d] = reg[i].ForDirection(d);
+                _blockFaceAtlas[i * 6 + d] = TileAtlasBaker.SliceOf(reg[i].ForDirection(d));
         return true;
     }
 
     void EnsurePrototype()
     {
         if (_material == null)
+        {
             _material = Resources.Load<Material>("ChunkMaterial");
+            if (_material != null)
+                _material.SetTexture("_TileArray", TileAtlasBaker.Array);
+        }
 
         if (_prototype != Entity.Null) return;
 

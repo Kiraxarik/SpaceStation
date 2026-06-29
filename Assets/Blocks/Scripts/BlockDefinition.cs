@@ -10,7 +10,7 @@ using UnityEngine;
 /// Example — wall_panel entry:
 /// {
 ///     "id":            "wall_panel",
-///     "tiles":         { "all": 3 },
+///     "tiles":         { "all": "base:wall" },
 ///     "solid":         true,
 ///     "atmos_passable": false
 /// }
@@ -63,14 +63,16 @@ public class BlockDefinitionData
 [Serializable]
 public class BlockTileData
 {
-    public int all = -1;   // shorthand: every face uses this tile
-    public int top = -1;   // +Y face override
-    public int bottom = -1;   // -Y face override
-    public int side = -1;   // +X/-X/+Z/-Z override (four side faces)
-    public int posX = -1;   // individual face overrides
-    public int negX = -1;
-    public int posZ = -1;
-    public int negZ = -1;
+    // Tile string ids ("base:floor_top"). Empty = unspecified, falls through the
+    // resolution order below. Faces with no tile resolve to the missing slice.
+    public string all = "";    // shorthand: every face uses this tile
+    public string top = "";    // +Y face override
+    public string bottom = ""; // -Y face override
+    public string side = "";   // +X/-X/+Z/-Z override (four side faces)
+    public string posX = "";   // individual face overrides
+    public string negX = "";
+    public string posZ = "";
+    public string negZ = "";
 
     /// <summary>
     /// Converts this data into the BlockFaces struct used by the mesh systems.
@@ -85,11 +87,11 @@ public class BlockTileData
         NegZ = Resolve(negZ, side, all),
     };
 
-    /// <summary>Returns the first non-negative value, or 0 if all are -1.</summary>
-    static int Resolve(params int[] candidates)
+    /// <summary>Returns the first non-empty tile id, or "" if none are set.</summary>
+    static string Resolve(params string[] candidates)
     {
-        foreach (int v in candidates)
-            if (v >= 0) return v;
-        return 0;
+        foreach (string v in candidates)
+            if (!string.IsNullOrEmpty(v)) return v;
+        return "";
     }
 }

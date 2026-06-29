@@ -2,21 +2,25 @@
     "blocks": [
         {
             "id": "air",
-            "tiles": { "all": 0 },
+            "tiles": {},
             "solid": false,
             "atmos_passable": true,
             "conductivity": 0
         },
         {
             "id": "floor_tile",
-            "tiles": { "top": 0, "bottom": 2, "side": 1 },
+            "tiles": {
+                "top": "base:floor_top",
+                "bottom": "base:floor_bottom",
+                "side": "base:floor_side"
+            },
             "solid": true,
             "atmos_passable": false,
             "conductivity": 0
         },
         {
             "id": "wall_panel",
-            "tiles": { "all": 3 },
+            "tiles": { "all": "base:wall" },
             "solid": true,
             "atmos_passable": false,
             "conductivity": 0

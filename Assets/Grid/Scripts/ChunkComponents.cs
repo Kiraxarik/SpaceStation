@@ -32,18 +32,20 @@ public static class ChunkSettings
 /// </summary>
 public struct BlockFaces
 {
-    public int Top, Bottom, PosX, NegX, PosZ, NegZ;
+    // Six per-face tile string ids (e.g. "base:floor_top"). Resolved to
+    // Texture2DArray slice indices by TileAtlasBaker on the client.
+    public string Top, Bottom, PosX, NegX, PosZ, NegZ;
 
-    public static BlockFaces Uniform(int tile) => new BlockFaces
+    public static BlockFaces Uniform(string tile) => new BlockFaces
     { Top = tile, Bottom = tile, PosX = tile, NegX = tile, PosZ = tile, NegZ = tile };
 
-    public static BlockFaces TopSideBottom(int top, int side, int bottom) => new BlockFaces
+    public static BlockFaces TopSideBottom(string top, string side, string bottom) => new BlockFaces
     { Top = top, Bottom = bottom, PosX = side, NegX = side, PosZ = side, NegZ = side };
 
-    public static BlockFaces Custom(int top, int bottom, int posX, int negX, int posZ, int negZ) => new BlockFaces
+    public static BlockFaces Custom(string top, string bottom, string posX, string negX, string posZ, string negZ) => new BlockFaces
     { Top = top, Bottom = bottom, PosX = posX, NegX = negX, PosZ = posZ, NegZ = negZ };
 
-    public int ForDirection(int dir) => dir switch
+    public string ForDirection(int dir) => dir switch
     {
         0 => Top,
         1 => Bottom,
@@ -51,7 +53,7 @@ public struct BlockFaces
         3 => NegX,
         4 => PosZ,
         5 => NegZ,
-        _ => 0
+        _ => ""
     };
 }
 

@@ -2,7 +2,7 @@ Shader "Custom/VoxelAtlas"
 {
     Properties
     {
-        [MainTexture] _BaseColorMap ("Block Atlas (32px tiles, 16 cols)", 2D) = "white" {}
+        _TileArray ("Tile Array (Texture2DArray)", 2DArray) = "" {}
     }
 
     SubShader
@@ -29,14 +29,15 @@ Shader "Custom/VoxelAtlas"
             #pragma vertex   Vert
             #pragma fragment Frag
             #pragma target   4.5
+            #pragma require  2darray
             #pragma multi_compile _ DOTS_INSTANCING_ON
             #pragma instancing_options renderinglayer
 
             #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
             #include "Packages/com.unity.render-pipelines.high-definition/Runtime/ShaderLibrary/ShaderVariables.hlsl"
 
-            TEXTURE2D(_BaseColorMap);
-            SAMPLER(sampler_BaseColorMap);
+            TEXTURE2D_ARRAY(_TileArray);
+            SAMPLER(sampler_TileArray);
 
             struct Attributes
             {
@@ -72,18 +73,12 @@ Shader "Custom/VoxelAtlas"
 
             float4 Frag(Varyings IN) : SV_Target
             {
-                const float ATLAS_COLS = 16.0;
-                const float TILE       = 1.0 / ATLAS_COLS;
-
-                // Half-texel inset so interpolation never bleeds into an
-                // adjacent tile at the frac() repeat boundary.
-                // Atlas is 512px wide (16 tiles x 32px) → 1 texel = 1/512.
-                const float HALF_TEXEL = 0.5 / 512.0;
-
-                float2 local = frac(IN.uv0) * TILE;
-                local = clamp(local, HALF_TEXEL, TILE - HALF_TEXEL);
-
-                float4 col = SAMPLE_TEXTURE2D(_BaseColorMap, sampler_BaseColorMap, local + IN.uv1);
+                // Each tile is its own array slice. UV0 is local block coords
+                // (0..w); the array's Repeat wrap tiles it per block. No atlas
+                // sub-rect math and no half-texel clamp — slices can't bleed into
+                // each other, and continuous uv0 keeps mip selection clean.
+                float slice  = IN.uv1.x;
+                float4 col   = SAMPLE_TEXTURE2D_ARRAY(_TileArray, sampler_TileArray, IN.uv0, slice);
 
                 float3 N     = normalize(IN.normalWS);
                 float3 L     = normalize(float3(0.5, 1.0, 0.3));
