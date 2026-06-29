@@ -12,12 +12,12 @@ using UnityEngine;
 ///      server ordering via BlockRegistry.InitializeFromManifest and tag the
 ///      connection ContentManifestReady.
 ///
-/// Local definitions (loaded at startup) supply the DATA — faces, sim properties.
-/// The server supplies the IDENTITY ordering. Adopting it overwrites the client's
-/// own startup-derived numbering, which is exactly what makes the server
-/// authoritative when content differs. When content matches (incl. host mode over
-/// loopback) the adopted ordering is identical to what the client already had, so
-/// the rebuild is a harmless no-op.
+/// Local definitions (loaded at startup by ContentBootstrap and cached in
+/// BlockRegistry) supply the DATA — faces, sim properties. The server supplies the
+/// IDENTITY ordering. Adopting it overwrites the client's own startup-derived
+/// numbering, which is what makes the server authoritative when content differs.
+/// When content matches (incl. host mode over loopback) the adopted ordering is
+/// identical to what the client already had, so the rebuild is a harmless no-op.
 ///
 /// Runs before ClientChunkReceiveSystem so the readiness tag is visible to its
 /// reception gate the same frame it's set.
@@ -26,8 +26,6 @@ using UnityEngine;
 [UpdateBefore(typeof(ClientChunkReceiveSystem))]
 public partial class ClientContentManifestSystem : SystemBase
 {
-    BlockRegistryConfig _config;
-
     // Staging for the in-flight manifest. A single manifest per connection, so
     // flat arrays sized to the byte id space are enough.
     readonly string[] _staging = new string[256];
@@ -38,11 +36,6 @@ public partial class ClientContentManifestSystem : SystemBase
 
     protected override void OnCreate()
     {
-        _config = Resources.Load<BlockRegistryConfig>("BlockRegistryConfig");
-        if (_config == null)
-            Debug.LogError("[ClientContentManifest] BlockRegistryConfig not found in any Resources/ folder. " +
-                           "The client cannot adopt the server manifest without it.");
-
         RequireForUpdate<NetworkStreamInGame>();
     }
 
@@ -114,7 +107,7 @@ public partial class ClientContentManifestSystem : SystemBase
             order.Add(_staging[i]);
         }
 
-        BlockRegistry.InitializeFromManifest(order, _config);
+        BlockRegistry.InitializeFromManifest(order);
         _adopted = true;
 
         // Tag every in-game connection ready so ClientChunkReceiveSystem proceeds.

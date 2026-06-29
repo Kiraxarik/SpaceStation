@@ -5,105 +5,93 @@ using UnityEngine;
 
 /// <summary>
 /// Runtime block registry — the lookup surface the rest of the game reads from
-/// (Faces[], Definitions, GetId, …). Its public shape is unchanged, so the mesh
-/// systems and interaction code are untouched.
+/// (Faces[], Definitions, GetId, …). Public shape unchanged, so mesh systems and
+/// interaction code are untouched.
 ///
-/// What changed: the registry no longer parses files or reads authored numeric
-/// ids itself. It composes the two separated tasks instead:
-///   Task A  BlockContentLoader.LoadAll  → definitions keyed by namespaced id
-///   Task B  ContentManifest.Build       → deterministic string id → byte id map
-/// then indexes its tables by the manifest's numeric ids.
+/// Content is no longer loaded here. ContentBootstrap resolves the mod load order,
+/// loads each mod's block definitions in order, and hands the full set to
+/// BuildLocal. The loaded defs are cached so the client can re-number them against
+/// the server's authoritative ordering at handshake (InitializeFromManifest)
+/// without re-reading any files.
 ///
-/// Numeric ids are now ASSIGNED, never authored (architecture §1.5). Initialize()
-/// derives the assignment locally and deterministically — correct for the server,
-/// and correct for the client as long as content matches. When content can differ
-/// (real mods), the client will instead call InitializeFromManifest() with the
-/// server's authoritative ordering (Module 4); everything below already supports
-/// that — only the source of the ordering changes.
+/// Numeric ids are assigned, never authored (§1.5):
+///   BuildLocal               → deterministic local ordering (server, and client at startup)
+///   InitializeFromManifest   → adopt the server's ordering (client, post-handshake)
 /// </summary>
 public static class BlockRegistry
 {
     // ── Public API (unchanged contract) ───────────────────────────────────────
 
-    /// <summary>Indexed by byte block value. Faces[id].ForDirection(dir) → atlas tile.</summary>
     public static BlockFaces[] Faces { get; private set; } = Array.Empty<BlockFaces>();
 
-    /// <summary>Maps stable string id ("base:wall_panel") → session byte id.</summary>
     public static IReadOnlyDictionary<string, byte> IdByName { get; private set; }
         = new Dictionary<string, byte>();
 
-    /// <summary>Maps session byte id → stable string id. Use this when writing saves.</summary>
     public static IReadOnlyDictionary<byte, string> NameById { get; private set; }
         = new Dictionary<byte, string>();
 
-    /// <summary>Full definitions (sim properties) for Phase 3 systems.</summary>
     public static IReadOnlyDictionary<byte, BlockDefinitionData> Definitions { get; private set; }
         = new Dictionary<byte, BlockDefinitionData>();
 
-    /// <summary>
-    /// The session manifest (string id ↔ byte id ordering) this registry was
-    /// built from. Module 4 serializes Manifest.Order across the handshake.
-    /// </summary>
+    /// <summary>The session manifest this registry was built from. Module 4 serializes Manifest.Order.</summary>
     public static ContentManifest Manifest { get; private set; }
 
     /// <summary>
-    /// Returns the byte id for a block, or 0 (air) if not found. Accepts a fully
-    /// namespaced id ("base:floor_tile") or a bare name ("floor_tile"), which is
-    /// resolved against the base namespace for convenience so game code needn't
-    /// hardcode the "base:" prefix everywhere.
+    /// Byte id for a block, or 0 (air) if not found. Accepts a namespaced id
+    /// ("base:floor_tile") or a bare name ("floor_tile") resolved against base.
     /// </summary>
     public static byte GetId(string blockName)
     {
         if (IdByName.TryGetValue(blockName, out byte id)) return id;
-
-        if (!blockName.Contains(':') &&
-            IdByName.TryGetValue($"{BlockContentLoader.BaseNamespace}:{blockName}", out id))
-            return id;
-
+        if (!blockName.Contains(':') && IdByName.TryGetValue($"base:{blockName}", out id)) return id;
         return 0;
     }
 
-    /// <summary>Returns the definition for a byte id, or null if unregistered.</summary>
     public static BlockDefinitionData GetDefinition(byte id)
         => Definitions.TryGetValue(id, out var def) ? def : null;
 
-    // ── Initialisation ────────────────────────────────────────────────────────
+    // ── Build ──────────────────────────────────────────────────────────────────
+
+    // Cached so InitializeFromManifest can re-number the same loaded data against
+    // the server ordering without re-reading mod files.
+    static List<BlockDefinitionData> _loadedDefs;
 
     /// <summary>
-    /// Loads local content and numbers it with a locally-derived deterministic
-    /// manifest. Called by BlockRegistryConfig.AutoLoad() before any scene loads.
+    /// Builds the registry from the full, ordered set of block definitions using a
+    /// locally-derived deterministic manifest. Called by ContentBootstrap at startup
+    /// (server, and client before it connects).
     /// </summary>
-    public static void Initialize(BlockRegistryConfig config)
+    public static void BuildLocal(List<BlockDefinitionData> defs)
     {
-        var defs = BlockContentLoader.LoadAll(config);                 // Task A
-        var manifest = ContentManifest.Build(defs.Select(d => d.id));  // Task B (local authority)
+        _loadedDefs = defs;
+        var manifest = ContentManifest.Build(defs.Select(d => d.id));
         PopulateFrom(manifest, defs);
     }
 
     /// <summary>
-    /// Loads local content but numbers it with an externally-provided ordering —
-    /// the server's authoritative manifest. Used by the client post-handshake
-    /// (Module 4). Local definitions supply the DATA (faces, sim props); the
-    /// server supplies the IDENTITY ordering. A manifest entry with no matching
-    /// local definition keeps default faces until its asset arrives (Module 5).
+    /// Re-numbers the already-loaded definitions against an externally-provided
+    /// ordering — the server's authoritative manifest (Module 4). Local defs supply
+    /// the DATA; the server supplies the IDENTITY ordering. A manifest entry with no
+    /// matching local definition keeps default faces until its asset arrives.
     /// </summary>
-    public static void InitializeFromManifest(IReadOnlyList<string> serverOrder, BlockRegistryConfig config)
+    public static void InitializeFromManifest(IReadOnlyList<string> serverOrder)
     {
-        var defs = BlockContentLoader.LoadAll(config);                 // Task A
-        var manifest = ContentManifest.BuildFromOrder(serverOrder);    // Task B (server authority)
-        PopulateFrom(manifest, defs);
+        if (_loadedDefs == null)
+        {
+            Debug.LogError("[BlockRegistry] InitializeFromManifest called before content was loaded. " +
+                           "ContentBootstrap must run first.");
+            return;
+        }
+
+        var manifest = ContentManifest.BuildFromOrder(serverOrder);
+        PopulateFrom(manifest, _loadedDefs);
     }
 
     // ── Table population ───────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Builds the runtime lookup tables from a manifest (the numbering) plus the
-    /// loaded definitions (the data). Indexed strictly by the manifest's numeric
-    /// ids so Faces[]/Definitions agree with whatever ordering was chosen.
-    /// </summary>
     static void PopulateFrom(ContentManifest manifest, List<BlockDefinitionData> defs)
     {
-        // Resolve duplicates by string id here: later definition wins (load order).
+        // Resolve duplicate ids: later definition wins (mod load order).
         var defByName = new Dictionary<string, BlockDefinitionData>(defs.Count, StringComparer.Ordinal);
         foreach (var d in defs)
         {
@@ -135,8 +123,6 @@ public static class BlockRegistry
             }
             else if (id != ContentManifest.AirId)
             {
-                // Air legitimately may carry no faces; anything else missing here
-                // means the manifest references content we have no local data for.
                 missingData++;
             }
         }

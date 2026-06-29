@@ -2,7 +2,6 @@
     "blocks": [
         {
             "id": "air",
-            "numeric_id": 0,
             "tiles": { "all": 0 },
             "solid": false,
             "atmos_passable": true,
@@ -10,7 +9,6 @@
         },
         {
             "id": "floor_tile",
-            "numeric_id": 1,
             "tiles": { "top": 0, "bottom": 2, "side": 1 },
             "solid": true,
             "atmos_passable": false,
@@ -18,7 +16,6 @@
         },
         {
             "id": "wall_panel",
-            "numeric_id": 2,
             "tiles": { "all": 3 },
             "solid": true,
             "atmos_passable": false,

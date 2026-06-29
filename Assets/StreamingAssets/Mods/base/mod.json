@@ -1,0 +1,9 @@
+{
+    "id": "base",
+    "name": "Base Game",
+    "version": "1.0.0",
+    "author": "Kiraxarik",
+    "description": "SpaceStation base game content.",
+    "api_version": 1,
+    "dependencies": []
+}

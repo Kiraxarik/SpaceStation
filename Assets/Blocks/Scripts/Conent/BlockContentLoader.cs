@@ -4,98 +4,45 @@ using System.IO;
 using UnityEngine;
 
 /// <summary>
-/// Task A of the content pipeline: discovery + parse + namespacing.
+/// Task A (dense tile layer): parse one mod's blocks.json into namespaced block
+/// definitions. No numeric ids (that's ContentManifest), no discovery — the mod
+/// package loader owns discovery and load order and calls this per mod, in order.
 ///
-/// Reads block definitions from the base game (a TextAsset on BlockRegistryConfig)
-/// and from each mod (StreamingAssets/Mods/&lt;mod&gt;/blocks.json), and returns them
-/// keyed by stable, namespaced string id. It assigns NO numeric ids — that is
-/// Task B (ContentManifest). Keeping the two apart is what lets the same loaded
-/// set be numbered by a local deterministic build (today) or by the server's
-/// authoritative ordering (Module 4) without re-reading any files.
-///
-/// Namespacing: a bare authored id ("wall_panel") is prefixed with its source
-/// namespace → "base:wall_panel" for the base file, "&lt;modfolder&gt;:wall_panel" for a
-/// mod. An id that already contains ':' is left untouched, so a mod can author
-/// "base:wall_panel" to deliberately target/override base content. (Override
-/// precedence when two sources share an id is "later load wins"; an explicit
-/// mod load-order is a later concern — for now base loads first, then mods.)
+/// The namespace is the mod's canonical id (from mod.json), so a block authored
+/// "wall_panel" in mod "base" becomes "base:wall_panel". An id already containing
+/// ':' is left as authored, letting a mod target/override another's content (the
+/// override is well-defined because the resolver guarantees the overriding mod
+/// loads later).
 /// </summary>
 public static class BlockContentLoader
 {
-    public const string BaseNamespace = "base";
-    const string ModBlocksFile = "blocks.json";
+    const string BlocksFileName = "blocks.json";
 
     /// <summary>
-    /// Loads every block definition from base + mods, with ids namespaced.
-    /// Duplicates are NOT resolved here (the registry decides override precedence);
-    /// this just returns everything it found, in load order (base first).
+    /// Loads block definitions from one mod folder. Returns empty if the mod has
+    /// no blocks.json (mods needn't define blocks).
     /// </summary>
-    public static List<BlockDefinitionData> LoadAll(BlockRegistryConfig config)
-    {
-        var all = new List<BlockDefinitionData>();
-
-        // ── 1. Base game ──────────────────────────────────────────────────────
-        if (config != null && config.BaseBlocksFile != null)
-        {
-            var parsed = ParseAndNamespace(
-                config.BaseBlocksFile.text, config.BaseBlocksFile.name, BaseNamespace);
-            all.AddRange(parsed);
-            Debug.Log($"[BlockContentLoader] Base: {parsed.Count} block(s) from '{config.BaseBlocksFile.name}'.");
-        }
-        else
-        {
-            Debug.LogError("[BlockContentLoader] No Base Blocks File assigned in BlockRegistryConfig. " +
-                           "Drag your blocks.json into the field in the Inspector.");
-        }
-
-        // ── 2. Mods (StreamingAssets/Mods/<mod>/blocks.json) ──────────────────
-        string modsRoot = Path.Combine(Application.streamingAssetsPath, "Mods");
-        if (Directory.Exists(modsRoot))
-        {
-            foreach (string modDir in Directory.EnumerateDirectories(modsRoot))
-            {
-                string modName = Path.GetFileName(modDir);
-                string ns = Sanitize(modName);
-                string modFile = Path.Combine(modDir, ModBlocksFile);
-                if (!File.Exists(modFile)) continue;
-
-                try
-                {
-                    var parsed = ParseAndNamespace(
-                        File.ReadAllText(modFile), $"{modName}/{ModBlocksFile}", ns);
-                    all.AddRange(parsed);
-                    Debug.Log($"[BlockContentLoader] Mod '{modName}' (ns '{ns}'): {parsed.Count} block(s).");
-                }
-                catch (Exception e)
-                {
-                    Debug.LogError($"[BlockContentLoader] Failed to load mod '{modName}': {e.Message}");
-                }
-            }
-        }
-
-        return all;
-    }
-
-    // ── Parse + namespace one file ─────────────────────────────────────────────
-
-    static List<BlockDefinitionData> ParseAndNamespace(string json, string sourceName, string ns)
+    public static List<BlockDefinitionData> LoadFromMod(string modDir, string ns)
     {
         var result = new List<BlockDefinitionData>();
+
+        string path = Path.Combine(modDir, BlocksFileName);
+        if (!File.Exists(path)) return result;
 
         BlocksFile file;
         try
         {
-            file = JsonUtility.FromJson<BlocksFile>(json);
+            file = JsonUtility.FromJson<BlocksFile>(File.ReadAllText(path));
         }
         catch (Exception e)
         {
-            Debug.LogError($"[BlockContentLoader] Failed to parse '{sourceName}': {e.Message}");
+            Debug.LogError($"[BlockContentLoader] Failed to parse '{ns}/{BlocksFileName}': {e.Message}");
             return result;
         }
 
         if (file?.blocks == null)
         {
-            Debug.LogWarning($"[BlockContentLoader] '{sourceName}' is empty or malformed.");
+            Debug.LogWarning($"[BlockContentLoader] '{ns}/{BlocksFileName}' is empty or malformed.");
             return result;
         }
 
@@ -103,28 +50,16 @@ public static class BlockContentLoader
         {
             if (def == null || string.IsNullOrWhiteSpace(def.id))
             {
-                Debug.LogWarning($"[BlockContentLoader] Entry in '{sourceName}' has no id. Skipping.");
+                Debug.LogWarning($"[BlockContentLoader] Entry in '{ns}/{BlocksFileName}' has no id. Skipping.");
                 continue;
             }
 
-            def.id = Namespace(def.id, ns);
+            def.id = def.id.Contains(':') ? def.id : $"{ns}:{def.id}";
             result.Add(def);
         }
 
+        Debug.Log($"[BlockContentLoader] '{ns}': {result.Count} block(s).");
         return result;
-    }
-
-    /// <summary>Prefixes a bare id with its source namespace; respects an explicit one.</summary>
-    static string Namespace(string id, string ns)
-        => id.Contains(':') ? id : $"{ns}:{id}";
-
-    /// <summary>Lowercases and replaces whitespace so a folder name is a clean namespace.</summary>
-    static string Sanitize(string raw)
-    {
-        var chars = raw.Trim().ToLowerInvariant().ToCharArray();
-        for (int i = 0; i < chars.Length; i++)
-            if (char.IsWhiteSpace(chars[i]) || chars[i] == ':') chars[i] = '_';
-        return new string(chars);
     }
 
     // ── JSON shape ─────────────────────────────────────────────────────────────
