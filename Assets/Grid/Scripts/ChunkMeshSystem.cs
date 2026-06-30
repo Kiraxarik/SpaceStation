@@ -59,7 +59,7 @@ public struct BuildChunkMeshJob : IJob
                         encoded = BlockFaceAtlas[here * 6 + forwardDir] + 1;
                     mask[ChunkSettings.SliceIndex(u, v)] = encoded;
                 }
-            GreedySweep(mask, slice, axis, uAxis, vAxis, forward: true);
+            GreedySweep(mask, slice, axis, uAxis, vAxis, forwardDir);
 
             for (int v = 0; v < S; v++)
                 for (int u = 0; u < S; u++)
@@ -71,12 +71,12 @@ public struct BuildChunkMeshJob : IJob
                         encoded = BlockFaceAtlas[here * 6 + backwardDir] + 1;
                     mask[ChunkSettings.SliceIndex(u, v)] = encoded;
                 }
-            GreedySweep(mask, slice, axis, uAxis, vAxis, forward: false);
+            GreedySweep(mask, slice, axis, uAxis, vAxis, backwardDir);
         }
     }
 
     void GreedySweep(NativeArray<int> mask, int slice,
-                     int axis, int uAxis, int vAxis, bool forward)
+                     int axis, int uAxis, int vAxis, int dir)
     {
         int S = ChunkSettings.SIZE;
         for (int v = 0; v < S; v++)
@@ -99,7 +99,7 @@ public struct BuildChunkMeshJob : IJob
 
                 var origin = new int3();
                 origin[axis] = slice; origin[uAxis] = u; origin[vAxis] = v;
-                EmitQuad(origin, w, h, axis, uAxis, vAxis, encoded - 1, forward);
+                EmitQuad(origin, w, h, axis, uAxis, vAxis, encoded - 1, dir);
 
                 for (int dv = 0; dv < h; dv++)
                     for (int du = 0; du < w; du++)
@@ -109,11 +109,32 @@ public struct BuildChunkMeshJob : IJob
             }
     }
 
+    /// <summary>
+    /// Per-face texture basis: which world axis (and sign) the tile's U and V
+    /// map to, given a face direction (0=+Y,1=-Y,2=+X,3=-X,4=+Z,5=-Z).
+    /// Side faces all put V on world-up (+Y); signs are chosen so the tile reads
+    /// un-mirrored when viewed from outside the face. Top/bottom use a fixed
+    /// X→U, Z→V convention so floor/ceiling tiles share one orientation.
+    /// </summary>
+    static void UVBasis(int dir, out int uAxis, out int uSign, out int vAxis, out int vSign)
+    {
+        switch (dir)
+        {
+            case 0: uAxis = 0; uSign = +1; vAxis = 2; vSign = +1; break; // +Y top
+            case 1: uAxis = 0; uSign = -1; vAxis = 2; vSign = +1; break; // -Y bottom
+            case 2: uAxis = 2; uSign = +1; vAxis = 1; vSign = +1; break; // +X
+            case 3: uAxis = 2; uSign = -1; vAxis = 1; vSign = +1; break; // -X
+            case 4: uAxis = 0; uSign = -1; vAxis = 1; vSign = +1; break; // +Z
+            default: uAxis = 0; uSign = +1; vAxis = 1; vSign = +1; break; // -Z
+        }
+    }
+
     void EmitQuad(int3 origin, int w, int h,
                   int axis, int uAxis, int vAxis,
-                  int tile, bool forward)
+                  int tile, int dir)
     {
         int vertBase = Vertices.Length;
+        bool forward = (dir & 1) == 0;   // even dirs (+Y/+X/+Z) are forward faces
         int axisBump = forward ? 1 : 0;
 
         var c0 = new int3(origin.x, origin.y, origin.z); c0[axis] += axisBump;
@@ -121,22 +142,33 @@ public struct BuildChunkMeshJob : IJob
         var c2 = c0; c2[uAxis] += w; c2[vAxis] += h;
         var c3 = c0; c3[vAxis] += h;
 
-        Vertices.Add(new float3(c0.x, c0.y, c0.z));
-        Vertices.Add(new float3(c1.x, c1.y, c1.z));
-        Vertices.Add(new float3(c2.x, c2.y, c2.z));
-        Vertices.Add(new float3(c3.x, c3.y, c3.z));
+        var wp0 = new float3(c0.x, c0.y, c0.z);
+        var wp1 = new float3(c1.x, c1.y, c1.z);
+        var wp2 = new float3(c2.x, c2.y, c2.z);
+        var wp3 = new float3(c3.x, c3.y, c3.z);
 
-        // UV0: local block coordinates across the quad.
-        // (0,0)→c0, (w,0)→c1, (w,h)→c2, (0,h)→c3.
-        // The shader does frac(uv0) to tile once per block unit.
-        UVs.Add(new float2(0, 0));
-        UVs.Add(new float2(w, 0));
-        UVs.Add(new float2(w, h));
-        UVs.Add(new float2(0, h));
+        Vertices.Add(wp0);
+        Vertices.Add(wp1);
+        Vertices.Add(wp2);
+        Vertices.Add(wp3);
 
-        // UV1.x: Texture2DArray slice index — same for all 4 verts.
-        // (UV0 stays local block coords; the shader samples float3(uv0, slice)
-        //  with the array's Repeat wrap doing the per-block tiling.)
+        // UV0: world-projected through a per-face basis so a tile shows in a
+        // consistent orientation on every face — V = world-up (+Y) on all four
+        // side faces, fixed convention on top/bottom — instead of inheriting the
+        // greedy mesher's per-axis (uAxis,vAxis) swap that turned directional
+        // tiles 90° between X and Z faces. Projecting from world position also
+        // makes tiles align seamlessly across quad and chunk boundaries. The
+        // shader's Repeat wrap does the per-block tiling, so absolute coords
+        // (including negatives) are fine.
+        UVBasis(dir, out int uA, out int uS, out int vA, out int vS);
+        UVs.Add(new float2(uS * wp0[uA], vS * wp0[vA]));
+        UVs.Add(new float2(uS * wp1[uA], vS * wp1[vA]));
+        UVs.Add(new float2(uS * wp2[uA], vS * wp2[vA]));
+        UVs.Add(new float2(uS * wp3[uA], vS * wp3[vA]));
+
+        // UV1.x: Texture2DArray slice index — same for all 4 verts. The shader
+        // samples float3(uv0, slice), with the array's Repeat wrap turning the
+        // world-projected UV0 into per-block tiling.
         var sliceUV = new float2(tile, 0f);
         AtlasUVs.Add(sliceUV);
         AtlasUVs.Add(sliceUV);

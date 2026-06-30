@@ -131,7 +131,7 @@ public struct BuildLODMeshJob : IJob
                     }
                     mask[u + v * cells] = encoded;
                 }
-            GreedySweep(mask, cells, slice, axis, uAxis, vAxis, forward: true);
+            GreedySweep(mask, cells, slice, axis, uAxis, vAxis, forwardDir);
 
             // ── Backward face: solid cell, air on the -axis side ───────────────
             for (int v = 0; v < cells; v++)
@@ -155,7 +155,7 @@ public struct BuildLODMeshJob : IJob
                     }
                     mask[u + v * cells] = encoded;
                 }
-            GreedySweep(mask, cells, slice, axis, uAxis, vAxis, forward: false);
+            GreedySweep(mask, cells, slice, axis, uAxis, vAxis, backwardDir);
         }
     }
 
@@ -163,7 +163,7 @@ public struct BuildLODMeshJob : IJob
 
     void GreedySweep(
         NativeArray<int> mask, int cells, int slice,
-        int axis, int uAxis, int vAxis, bool forward)
+        int axis, int uAxis, int vAxis, int dir)
     {
         for (int v = 0; v < cells; v++)
             for (int u = 0; u < cells; u++)
@@ -189,7 +189,7 @@ public struct BuildLODMeshJob : IJob
                 origin[axis] = slice;
                 origin[uAxis] = u;
                 origin[vAxis] = v;
-                EmitQuad(origin, w, h, axis, uAxis, vAxis, encoded - 1, forward);
+                EmitQuad(origin, w, h, axis, uAxis, vAxis, encoded - 1, dir);
 
                 // Clear consumed cells
                 for (int dv = 0; dv < h; dv++)
@@ -203,11 +203,31 @@ public struct BuildLODMeshJob : IJob
     // ── Quad emission ─────────────────────────────────────────────────────────
     // ── Quad emission ─────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Per-face texture basis: which world axis (and sign) the tile's U and V
+    /// map to, given a face direction (0=+Y,1=-Y,2=+X,3=-X,4=+Z,5=-Z). Must
+    /// match ChunkMeshSystem.UVBasis so full-res and LOD meshes orient tiles
+    /// identically.
+    /// </summary>
+    static void UVBasis(int dir, out int uAxis, out int uSign, out int vAxis, out int vSign)
+    {
+        switch (dir)
+        {
+            case 0: uAxis = 0; uSign = +1; vAxis = 2; vSign = +1; break; // +Y top
+            case 1: uAxis = 0; uSign = -1; vAxis = 2; vSign = +1; break; // -Y bottom
+            case 2: uAxis = 2; uSign = +1; vAxis = 1; vSign = +1; break; // +X
+            case 3: uAxis = 2; uSign = -1; vAxis = 1; vSign = +1; break; // -X
+            case 4: uAxis = 0; uSign = -1; vAxis = 1; vSign = +1; break; // +Z
+            default: uAxis = 0; uSign = +1; vAxis = 1; vSign = +1; break; // -Z
+        }
+    }
+
     void EmitQuad(int3 origin, int w, int h,
                   int axis, int uAxis, int vAxis,
-                  int tile, bool forward)
+                  int tile, int dir)
     {
         int vertBase = Vertices.Length;
+        bool forward = (dir & 1) == 0;   // even dirs (+Y/+X/+Z) are forward faces
         int axisBump = forward ? 1 : 0;
         int f = Factor;
 
@@ -216,24 +236,30 @@ public struct BuildLODMeshJob : IJob
         var c2 = c0; c2[uAxis] += w; c2[vAxis] += h;
         var c3 = c0; c3[vAxis] += h;
 
-        Vertices.Add(new float3(c0.x * f, c0.y * f, c0.z * f));
-        Vertices.Add(new float3(c1.x * f, c1.y * f, c1.z * f));
-        Vertices.Add(new float3(c2.x * f, c2.y * f, c2.z * f));
-        Vertices.Add(new float3(c3.x * f, c3.y * f, c3.z * f));
+        var wp0 = new float3(c0.x * f, c0.y * f, c0.z * f);
+        var wp1 = new float3(c1.x * f, c1.y * f, c1.z * f);
+        var wp2 = new float3(c2.x * f, c2.y * f, c2.z * f);
+        var wp3 = new float3(c3.x * f, c3.y * f, c3.z * f);
 
-        // UV0: block-space dimensions (cell units × Factor).
-        // A 2-cell-wide quad at Factor=2 covers 4 blocks → tiles 4×,
-        // matching the density of the full-res mesh.
-        float uw = w * f;
-        float uh = h * f;
-        UVs.Add(new float2(0, 0));
-        UVs.Add(new float2(uw, 0));
-        UVs.Add(new float2(uw, uh));
-        UVs.Add(new float2(0, uh));
+        Vertices.Add(wp0);
+        Vertices.Add(wp1);
+        Vertices.Add(wp2);
+        Vertices.Add(wp3);
 
-        // UV1.x: Texture2DArray slice index — same for all 4 verts.
-        // (UV0 stays local block coords; the shader samples float3(uv0, slice)
-        //  with the array's Repeat wrap doing the per-block tiling.)
+        // UV0: same world-projected per-face basis as the full-res mesh, so a
+        // tile keeps one orientation across LOD transitions (V = world-up on
+        // side faces) and stays aligned to the world block grid. Vertices are
+        // already in block space (cell × Factor), so the projection inherits the
+        // correct per-block tiling density.
+        UVBasis(dir, out int uA, out int uS, out int vA, out int vS);
+        UVs.Add(new float2(uS * wp0[uA], vS * wp0[vA]));
+        UVs.Add(new float2(uS * wp1[uA], vS * wp1[vA]));
+        UVs.Add(new float2(uS * wp2[uA], vS * wp2[vA]));
+        UVs.Add(new float2(uS * wp3[uA], vS * wp3[vA]));
+
+        // UV1.x: Texture2DArray slice index — same for all 4 verts. The shader
+        // samples float3(uv0, slice), with the array's Repeat wrap turning the
+        // world-projected UV0 into per-block tiling.
         var sliceUV = new float2(tile, 0f);
         AtlasUVs.Add(sliceUV);
         AtlasUVs.Add(sliceUV);

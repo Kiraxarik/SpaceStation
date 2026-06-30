@@ -27,6 +27,22 @@ public static class TileAtlasBaker
     static Dictionary<string, int> _sliceById;
     static bool _attempted;
 
+    /// <summary>
+    /// Resets static state at the start of every play session. Required because
+    /// with "Enter Play Mode → Reload Domain" disabled, statics persist across
+    /// plays: _attempted would stay true while the baked Array (a UnityEngine.Object)
+    /// is destroyed on play exit, so EnsureBaked would early-return false forever
+    /// and chunks would never mesh. SubsystemRegistration runs before any world or
+    /// scene load on every play, with or without domain reload.
+    /// </summary>
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+    static void ResetForPlaySession()
+    {
+        _attempted = false;
+        _sliceById = null;
+        Array = null;
+    }
+
     /// <summary>Bakes once. Returns false if baking failed (e.g. no GPU array support).</summary>
     public static bool EnsureBaked()
     {
@@ -45,7 +61,7 @@ public static class TileAtlasBaker
         int sliceCount = tiles.Count + 1; // +1 for the reserved "missing" slice 0
         var array = new Texture2DArray(TileSize, TileSize, sliceCount, TextureFormat.RGBA32, true, false)
         {
-            wrapMode   = TextureWrapMode.Repeat,
+            wrapMode = TextureWrapMode.Repeat,
             filterMode = FilterMode.Point,
             anisoLevel = 0,
         };
@@ -138,7 +154,7 @@ public static class TileAtlasBaker
     {
         var px = new Color[TileSize * TileSize];
         var magenta = new Color(1f, 0f, 0.86f, 1f);
-        var dark    = new Color(0.08f, 0.08f, 0.08f, 1f);
+        var dark = new Color(0.08f, 0.08f, 0.08f, 1f);
         for (int y = 0; y < TileSize; y++)
             for (int x = 0; x < TileSize; x++)
                 px[y * TileSize + x] = ((x / 8) + (y / 8)) % 2 == 0 ? magenta : dark;
