@@ -36,7 +36,7 @@ public partial struct ServerPlayerSpawnerSystem : ISystem
 
         if (playerPrefab == Entity.Null)
         {
-            Debug.LogWarning("[ServerPlayerSpawner] Player ghost prefab not found yet.");
+            //Debug.LogWarning("[ServerPlayerSpawner] Player ghost prefab not found yet.");
             return;
         }
 
@@ -46,7 +46,7 @@ public partial struct ServerPlayerSpawnerSystem : ISystem
             PlayerPrefab = playerPrefab
         });
 
-        Debug.Log("[ServerPlayerSpawner] PlayerSpawner singleton created.");
+        //Debug.Log("[ServerPlayerSpawner] PlayerSpawner singleton created.");
         state.Enabled = false;
     }
 }

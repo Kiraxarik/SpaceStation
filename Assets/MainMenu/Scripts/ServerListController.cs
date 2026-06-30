@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 /// <summary>One server entry's data.</summary>
 [System.Serializable]
@@ -26,6 +27,9 @@ public class ServerListController : MonoBehaviour
 
     [Header("Steam")]
     [SerializeField] uint appId = 480;        // Spacewar (dev). Your AppID later.
+
+    [Header("Join")]
+    [SerializeField] string gameplayScene = "OutdoorsScene"; // scene whose SubScene has the player ghost prefab
 
     SteamServerBrowser _browser;
 
@@ -73,6 +77,9 @@ public class ServerListController : MonoBehaviour
     void JoinServer(ServerInfo info)
     {
         Debug.Log($"[ServerList] Joining {info.Name} ({info.Address}:{info.Port})");
-        GameClient.Connect(info.Address, info.Port);
+
+        // The ECS connection lives in ClientWorld and survives the scene load.
+        if (GameClient.Connect(info.Address, info.Port))
+            SceneManager.LoadScene(gameplayScene);
     }
 }
