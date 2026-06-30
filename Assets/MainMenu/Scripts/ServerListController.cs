@@ -1,9 +1,8 @@
-using System;
 using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>One server entry's data.</summary>
-[Serializable]
+[System.Serializable]
 public class ServerInfo
 {
     public string Name;
@@ -12,46 +11,68 @@ public class ServerInfo
     public int Players;
     public int MaxPlayers;
     public int Ping;
-    [TextArea] public string Description;
+    [TextArea] public string Description; // currently Steam game tags
 }
 
 /// <summary>
-/// Fills the server list scroll view with one row per server. Refreshes when
-/// the panel is shown. The server source is a placeholder for now — swap
-/// GetServers() for a real fetch later without touching the UI.
+/// Populates the server list from Steam's browser. Refreshes when shown.
+/// Join hands the server's IP:port to the UDP connect path unchanged.
 /// </summary>
 public class ServerListController : MonoBehaviour
 {
     [Header("Refs")]
-    [SerializeField] Transform contentRoot;       // ScrollView > Viewport > Content
-    [SerializeField] ServerListEntry entryPrefab; // the row prefab
+    [SerializeField] Transform contentRoot;   // ScrollView > Viewport > Content
+    [SerializeField] GameObject entryPrefab;  // row prefab (has a ServerListEntry)
 
-    void OnEnable() => Refresh();
+    [Header("Steam")]
+    [SerializeField] uint appId = 480;        // Spacewar (dev). Your AppID later.
+
+    SteamServerBrowser _browser;
+
+    void OnEnable()
+    {
+        if (!SteamBootstrap.Initialized)
+        {
+            Debug.LogWarning("[ServerList] Steam not initialized — can't query servers.");
+            return;
+        }
+
+        _browser ??= new SteamServerBrowser(appId);
+        _browser.OnRefreshComplete -= Populate;
+        _browser.OnRefreshComplete += Populate;
+        Refresh();
+    }
+
+    void OnDisable()
+    {
+        if (_browser == null) return;
+        _browser.OnRefreshComplete -= Populate;
+        _browser.Cancel();
+    }
 
     /// <summary>Wire a Refresh button to this.</summary>
-    public void Refresh()
-    {
-        for (int i = contentRoot.childCount - 1; i >= 0; i--)
-            Destroy(contentRoot.GetChild(i).gameObject);
+    public void Refresh() => _browser?.Refresh();
 
-        foreach (var info in GetServers())
+    void Populate(List<ServerInfo> servers)
+    {
+        Clear();
+        foreach (var info in servers)
         {
-            var entry = Instantiate(entryPrefab, contentRoot);
+            var entry = Instantiate(entryPrefab, contentRoot)
+                .GetComponentInChildren<ServerListEntry>();
             entry.Setup(info, JoinServer);
         }
     }
 
-    // TODO(server): replace with a real fetch from your master-server list
-    // (and probe each for live player count / ping). Keep the signature.
-    static IEnumerable<ServerInfo> GetServers() => new[]
+    void Clear()
     {
-        new ServerInfo { Name = "Local Dev",           Address = "127.0.0.1", Port = 7979, Players = 0,  MaxPlayers = 50, Ping = 1,  Description = "Local editor/dev server." },
-        new ServerInfo { Name = "Placeholder Station", Address = "127.0.0.1", Port = 7980, Players = 12, MaxPlayers = 50, Ping = 42, Description = "Example entry. Real servers and descriptions come from the master list later." },
-    };
+        for (int i = contentRoot.childCount - 1; i >= 0; i--)
+            Destroy(contentRoot.GetChild(i).gameObject);
+    }
 
     void JoinServer(ServerInfo info)
     {
-        // TODO: connect to info.Address:info.Port via your client connect path.
-        Debug.Log($"[ServerList] Join {info.Name} ({info.Address}:{info.Port})");
+        Debug.Log($"[ServerList] Joining {info.Name} ({info.Address}:{info.Port})");
+        GameClient.Connect(info.Address, info.Port);
     }
 }
