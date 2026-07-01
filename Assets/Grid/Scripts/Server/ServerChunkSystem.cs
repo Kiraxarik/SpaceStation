@@ -102,6 +102,22 @@ public partial class ServerChunkSystem : SystemBase
         connections.Dispose();
     }
 
+    // ── External read access ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// Read-only block lookup for other server systems (currently ServerPartSystem,
+    /// to validate a part install target is solid) that need the store's current
+    /// value without duplicating chunk-coordinate resolution. 0 = air or an
+    /// unloaded/nonexistent chunk — same "no block here" meaning either way, which
+    /// is all a caller like "is this solid?" needs.
+    /// </summary>
+    public ushort GetBlockValue(int3 worldBlock)
+    {
+        int3 chunkCoord = WorldBlockToChunk(worldBlock, out int3 local);
+        int blockIndex = ChunkSettings.Index(local.x, local.y, local.z);
+        return _store.GetBlock(chunkCoord, blockIndex);
+    }
+
     // ── Placement resolution + broadcast ──────────────────────────────────────
 
     /// <summary>

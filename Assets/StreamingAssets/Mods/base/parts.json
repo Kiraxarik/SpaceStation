@@ -1,0 +1,14 @@
+{
+    "parts": [
+        {
+            "id": "wiring",
+            "slot": "subfloor-utility",
+            "primitives": [ "Conductive" ]
+        },
+        {
+            "id": "glass_pane",
+            "slot": "wall-covering",
+            "primitives": [ "GasBarrier" ]
+        }
+    ]
+}

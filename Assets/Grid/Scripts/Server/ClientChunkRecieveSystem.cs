@@ -238,6 +238,10 @@ public partial class ClientChunkReceiveSystem : SystemBase
 
         EntityManager.AddBuffer<ChunkBlockUpdate>(e);
 
+        // Model-backed block instances spawned for this chunk (ChunkModelInstanceSystem)
+        // — empty until/unless the chunk actually contains a model-backed block id.
+        EntityManager.AddBuffer<ChunkModelInstance>(e);
+
         // Chunks the server sends are always meant to be visible; start them at
         // Full LOD. ChunkStreamingSystem (if present) can still retier them by
         // distance afterwards.

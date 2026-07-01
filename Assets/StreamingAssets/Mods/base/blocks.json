@@ -24,6 +24,14 @@
             "solid": true,
             "atmos_passable": false,
             "conductivity": 0
+        },
+        {
+            "id": "frame",
+            "tiles": { "all": "base:wall" },
+            "model": "base:frame",
+            "solid": true,
+            "atmos_passable": true,
+            "conductivity": 0
         }
     ]
 }

@@ -6,10 +6,11 @@ using UnityEngine;
 /// ECS world, replacing the old per-registry AutoLoad hooks. It:
 ///   1. Discovers and resolves the mod set into a deterministic load order
 ///      (ModPackageLoader — dependencies, versions, api gate).
-///   2. Loads each mod's blocks, models, and sounds in that order, so override
-///      precedence is determined by declared dependencies, not filesystem order.
-///   3. Builds BlockRegistry (dense tile ids), ModelRegistry and SoundRegistry
-///      (sparse asset content).
+///   2. Loads each mod's blocks, models, sounds, tiles, and parts in that order,
+///      so override precedence is determined by declared dependencies, not
+///      filesystem order.
+///   3. Builds BlockRegistry (dense tile ids), ModelRegistry / SoundRegistry /
+///      PartRegistry (sparse asset + composition content).
 ///   4. Builds the AssetManifest (per-file + per-mod hashes) for the integrity /
 ///      distribution handshake.
 ///
@@ -17,9 +18,12 @@ using UnityEngine;
 /// on every process. The server's set is authoritative; a connecting client
 /// re-numbers its blocks against the server manifest at handshake
 /// (BlockRegistry.InitializeFromManifest) and diffs asset hashes to find downloads.
+/// PartRegistry is NOT part of that handshake yet — see its remarks (§0.3, parts
+/// are server-only simulation state today, nothing to sync).
 ///
 /// The base game is mod "base" (a StreamingAssets/Mods/base/ folder with mod.json +
-/// blocks.json + models.json + sounds.json + tiles.json) — it loads through exactly this path.
+/// blocks.json + models.json + sounds.json + tiles.json + parts.json) — it loads
+/// through exactly this path.
 /// </summary>
 public static class ContentBootstrap
 {
@@ -39,9 +43,9 @@ public static class ContentBootstrap
     /// absent — at Boot() is picked up once its files actually exist.
     ///
     /// Rebuilds every registry (BlockRegistry, ModelRegistry, SoundRegistry,
-    /// TileRegistry) and the AssetManifest from the local set, same as Boot().
-    /// This resets BlockRegistry to a freshly-derived LOCAL numeric ordering —
-    /// a caller that already adopted a server-authoritative ordering
+    /// TileRegistry, PartRegistry) and the AssetManifest from the local set, same
+    /// as Boot(). This resets BlockRegistry to a freshly-derived LOCAL numeric
+    /// ordering — a caller that already adopted a server-authoritative ordering
     /// (BlockRegistry.InitializeFromManifest) must re-apply it immediately
     /// afterward, or block ids drift back out of sync with the server.
     /// </summary>
@@ -68,6 +72,7 @@ public static class ContentBootstrap
         var allModels = new List<ModelContent>();
         var allSounds = new List<SoundContent>();
         var allTiles = new List<TileContent>();
+        var allParts = new List<PartContent>();
 
         foreach (var pkg in resolution.Order)
         {
@@ -75,12 +80,14 @@ public static class ContentBootstrap
             allModels.AddRange(ModelContentLoader.LoadFromMod(pkg.Directory, pkg.Id));
             allSounds.AddRange(SoundContentLoader.LoadFromMod(pkg.Directory, pkg.Id));
             allTiles.AddRange(TileContentLoader.LoadFromMod(pkg.Directory, pkg.Id));
+            allParts.AddRange(PartContentLoader.LoadFromMod(pkg.Directory, pkg.Id));
         }
 
         BlockRegistry.BuildLocal(allBlocks);
         ModelRegistry.Initialize(allModels);
         SoundRegistry.Initialize(allSounds);
         TileRegistry.Initialize(allTiles);
+        PartRegistry.Initialize(allParts);
 
         // Hash the loaded content for the integrity / distribution handshake.
         // Built after the registries so referenced asset files are known.

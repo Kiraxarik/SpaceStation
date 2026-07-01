@@ -1,12 +1,20 @@
 {
-    "models": [
-        {
-            "id": "debug_cube",
-            "type": "prop",
-            "display_name": "Debug Cube",
-            "geometry": "models/debug_cube.geo.json",
-            "textures": [ "textures/models/debug_cube.png" ],
-            "animations": []
-        }
-    ]
+  "models": [
+    {
+      "id": "debug_cube",
+      "type": "prop",
+      "display_name": "Debug Cube",
+      "geometry": "models/debug_cube.geo.json",
+      "textures": [ "textures/models/debug_cube.png" ],
+      "animations": []
+    },
+    {
+      "id": "frame",
+      "type": "prop",
+      "display_name": "Frame",
+      "geometry": "models/frame.geo.json",
+      "textures": [ "textures/models/frame.png" ],
+      "animations": []
+    }
+  ]
 }

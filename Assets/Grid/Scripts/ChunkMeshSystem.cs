@@ -23,6 +23,16 @@ public struct BuildChunkMeshJob : IJob
     [ReadOnly] public NativeArray<ushort> NeighborNegZ;
     [ReadOnly] public NativeArray<int> BlockFaceAtlas;
 
+    /// <summary>Per-block-id: true if BlockDefinitionData.model is set (Models
+    /// §1.E). A model-backed block emits NO face of its own here — its visual
+    /// comes from ChunkModelInstanceSystem instead — and is treated as
+    /// non-occluding (air-equivalent) so neighboring solid blocks still show
+    /// their face against it. Indexed 0..registry.Length-1, same length as one
+    /// row of BlockFaceAtlas. Full-LOD only; ChunkLODMeshSystem is unaware of
+    /// this and keeps rendering a solid textured cube at distance — see
+    /// ChunkMeshSystem's remarks for why that split is deliberate.</summary>
+    [ReadOnly] public NativeArray<bool> IsModelBacked;
+
     public NativeList<float3> Vertices;
     /// <summary>UV channel 0 — local block coords (0..w, 0..h). Shader fracs
     /// these to repeat once per block unit, then scales to one atlas tile.</summary>
@@ -56,7 +66,7 @@ public struct BuildChunkMeshJob : IJob
                     pos[uAxis] = u; pos[vAxis] = v; pos[axis] = slice;
                     ushort here = Blocks[ChunkSettings.Index(pos.x, pos.y, pos.z)];
                     int encoded = 0;
-                    if (here != 0 && NeighborIsAir(pos, axis, +1))
+                    if (here != 0 && !IsModelBacked[here] && NeighborIsAir(pos, axis, +1))
                         encoded = BlockFaceAtlas[here * 6 + forwardDir] + 1;
                     mask[ChunkSettings.SliceIndex(u, v)] = encoded;
                 }
@@ -68,7 +78,7 @@ public struct BuildChunkMeshJob : IJob
                     pos[uAxis] = u; pos[vAxis] = v; pos[axis] = slice;
                     ushort here = Blocks[ChunkSettings.Index(pos.x, pos.y, pos.z)];
                     int encoded = 0;
-                    if (here != 0 && NeighborIsAir(pos, axis, -1))
+                    if (here != 0 && !IsModelBacked[here] && NeighborIsAir(pos, axis, -1))
                         encoded = BlockFaceAtlas[here * 6 + backwardDir] + 1;
                     mask[ChunkSettings.SliceIndex(u, v)] = encoded;
                 }
@@ -197,7 +207,10 @@ public struct BuildChunkMeshJob : IJob
 
         int S = ChunkSettings.SIZE;
         if (nx >= 0 && nx < S && ny >= 0 && ny < S && nz >= 0 && nz < S)
-            return Blocks[ChunkSettings.Index(nx, ny, nz)] == 0;
+        {
+            ushort val = Blocks[ChunkSettings.Index(nx, ny, nz)];
+            return val == 0 || IsModelBacked[val]; // model-backed = non-occluding, see IsModelBacked remarks
+        }
 
         NativeArray<ushort> slice;
         int su, sv;
@@ -205,7 +218,8 @@ public struct BuildChunkMeshJob : IJob
         else if (axis == 0) { slice = sign > 0 ? NeighborPosX : NeighborNegX; su = pos.z; sv = pos.y; }
         else { slice = sign > 0 ? NeighborPosZ : NeighborNegZ; su = pos.x; sv = pos.y; }
 
-        return slice[ChunkSettings.SliceIndex(su, sv)] == 0;
+        ushort neighborVal = slice[ChunkSettings.SliceIndex(su, sv)];
+        return neighborVal == 0 || IsModelBacked[neighborVal];
     }
 }
 
@@ -240,12 +254,23 @@ struct ChunkBuildResult
 // filter, not the ordering attribute: excluding the system from the server
 // world entirely removes both the log spam and the pointless instantiate-then-
 // disable.
+//
+// Model-backed blocks (Models §1.E): only THIS system (the Full-LOD greedy
+// mesher) skips a model-backed block's own faces and treats it as
+// non-occluding — see BuildChunkMeshJob.IsModelBacked. ChunkLODMeshSystem (the
+// downsampled Medium/Far/VeryFar tiers) is deliberately untouched and keeps
+// rendering such a block as an ordinary solid textured cube from its
+// BlockDefinitionData.tiles fallback — instancing real per-block geometry at
+// LOD distance isn't worth the complexity when a solid stand-in reads fine
+// from far away. ChunkModelInstanceSystem (UpdateBefore this system) is what
+// actually spawns the real model at Full LOD.
 [WorldSystemFilter(WorldSystemFilterFlags.ClientSimulation)]
 public partial class ChunkMeshSystem : SystemBase
 {
     Entity _prototype;
     Material _material;
     NativeArray<int> _blockFaceAtlas;
+    NativeArray<bool> _isModelBacked;
 
     protected override void OnCreate()
     {
@@ -255,6 +280,7 @@ public partial class ChunkMeshSystem : SystemBase
     protected override void OnDestroy()
     {
         if (_blockFaceAtlas.IsCreated) _blockFaceAtlas.Dispose();
+        if (_isModelBacked.IsCreated) _isModelBacked.Dispose();
     }
 
     /// <summary>
@@ -268,6 +294,7 @@ public partial class ChunkMeshSystem : SystemBase
     public void InvalidateAtlasCache()
     {
         if (_blockFaceAtlas.IsCreated) _blockFaceAtlas.Dispose();
+        if (_isModelBacked.IsCreated) _isModelBacked.Dispose();
     }
 
     bool EnsureAtlas()
@@ -288,9 +315,15 @@ public partial class ChunkMeshSystem : SystemBase
         // now a slice index instead of an old-atlas tile index.)
         var reg = BlockRegistry.Faces;
         _blockFaceAtlas = new NativeArray<int>(reg.Length * 6, Allocator.Persistent);
+        _isModelBacked = new NativeArray<bool>(reg.Length, Allocator.Persistent);
         for (int i = 0; i < reg.Length; i++)
+        {
             for (int d = 0; d < 6; d++)
                 _blockFaceAtlas[i * 6 + d] = TileAtlasBaker.SliceOf(reg[i].ForDirection(d));
+
+            var def = BlockRegistry.GetDefinition((ushort)i);
+            _isModelBacked[i] = def != null && !string.IsNullOrEmpty(def.model);
+        }
         return true;
     }
 
@@ -363,6 +396,7 @@ public partial class ChunkMeshSystem : SystemBase
                 NeighborPosZ = nPosZ,
                 NeighborNegZ = nNegZ,
                 BlockFaceAtlas = _blockFaceAtlas,
+                IsModelBacked = _isModelBacked,
                 Vertices = verts,
                 UVs = uvs,
                 AtlasUVs = atlasUvs,

@@ -42,8 +42,36 @@ public struct BlockChangedEvent : IComponentData
 }
 
 /// <summary>
-/// Destroys all BlockChangedEvent entities at the end of each server frame so
-/// consequence systems always see only the current frame's writes.
+/// Emitted by ServerPartSystem every time a part is installed onto or removed
+/// from a tile — the sparse-layer counterpart to BlockChangedEvent (§2.3, §7.1).
+///
+/// When Installed is false and this removal emptied the tile (its last part),
+/// ServerPartSystem destroys the tile entity BEFORE this event is queryable by
+/// other systems this frame — TileEntity will already be dead. Treat WorldBlock +
+/// PartId as the durable identity for a removal; only dereference TileEntity
+/// after checking EntityManager.Exists, and only meaningfully for Installed == true.
+///
+/// Swept by the same BlockChangedEventCleanupSystem, same frame-end timing.
+/// </summary>
+public struct PartChangedEvent : IComponentData
+{
+    /// <summary>Global block coordinate of the tile this part changed on.</summary>
+    public int3 WorldBlock;
+
+    /// <summary>The tile entity — see the "already destroyed" caveat above.</summary>
+    public Entity TileEntity;
+
+    /// <summary>PartRegistry numeric id of the part that was installed or removed.</summary>
+    public ushort PartId;
+
+    /// <summary>True = installed, false = removed.</summary>
+    public bool Installed;
+}
+
+/// <summary>
+/// Destroys all BlockChangedEvent and PartChangedEvent entities at the end of
+/// each server frame so consequence systems always see only the current frame's
+/// writes.
 ///
 /// Runs last in SimulationSystemGroup so every system that wants to react to the
 /// events can do so first.
@@ -59,6 +87,12 @@ public partial struct BlockChangedEventCleanupSystem : ISystem
 
         foreach (var (_, entity) in
             SystemAPI.Query<RefRO<BlockChangedEvent>>().WithEntityAccess())
+        {
+            ecb.DestroyEntity(entity);
+        }
+
+        foreach (var (_, entity) in
+            SystemAPI.Query<RefRO<PartChangedEvent>>().WithEntityAccess())
         {
             ecb.DestroyEntity(entity);
         }

@@ -162,3 +162,16 @@ public class ChunkMeshRef : IComponentData
 {
     public Mesh Value;
 }
+
+/// <summary>
+/// One entry per model-backed block instance currently spawned for this chunk
+/// (ChunkModelInstanceSystem) — e.g. a frame block rendered via Blockbench
+/// geometry instead of the greedy mesher. Tracked here so a re-dirty (block
+/// placed/removed) can tear the old set down before rebuilding, rather than
+/// leaking orphaned render entities.
+/// </summary>
+[InternalBufferCapacity(0)]
+public struct ChunkModelInstance : IBufferElementData
+{
+    public Entity Value;
+}

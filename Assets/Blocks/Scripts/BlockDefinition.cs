@@ -15,6 +15,21 @@ using UnityEngine;
 ///     "atmos_passable": false
 /// }
 ///
+/// Example — a model-backed block (frame entry):
+/// {
+///     "id":     "frame",
+///     "tiles":  { "all": "base:wall" },
+///     "model":  "base:frame",
+///     "solid":  true,
+///     "atmos_passable": true
+/// }
+/// "tiles" is still required even when "model" is set — it's the fallback used
+/// by the LOD downsample mesher (ChunkLODMeshSystem), which keeps rendering a
+/// solid textured cube at distance rather than trying to instance real geometry
+/// there. Only the Full-LOD near-range greedy mesher (ChunkMeshSystem) skips its
+/// own face generation for a model-backed block and treats it as non-occluding,
+/// deferring to ChunkModelInstanceSystem for the actual visual.
+///
 /// Note there is NO numeric id here. Numeric (byte) ids are assigned at load by
 /// the content manifest (architecture §1.5), never authored — that is what frees
 /// mods from hand-coordinating id ranges. The authored "id" is namespaced by its
@@ -32,8 +47,17 @@ public class BlockDefinitionData
     /// </summary>
     public string id = "";
 
-    /// <summary>Which atlas tiles to use on each face.</summary>
+    /// <summary>Which atlas tiles to use on each face. Still required even for a
+    /// model-backed block — see the model-backed example above.</summary>
     public BlockTileData tiles = new BlockTileData();
+
+    /// <summary>
+    /// Optional namespaced model id ("base:frame") from ModelRegistry. When set,
+    /// the block renders via BlockbenchGeometryParser/ModelMeshCache instead of
+    /// the greedy-meshed flat cube at Full LOD (see the ChunkMeshSystem remarks
+    /// above for the LOD split). Empty = ordinary voxel block, unaffected.
+    /// </summary>
+    public string model = "";
 
     // ── Future simulation properties ───────────────────────────────────────
     // Don't affect rendering now; here so mods can define them and Phase 3
