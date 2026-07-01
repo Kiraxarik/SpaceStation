@@ -46,8 +46,8 @@ MonoBehaviour:
         m_Name: Player 2
         m_RunMode: 0
         m_Settings:
-          BuildProfile: {fileID: 11400000, guid: 0e6f92216b59fdf4bb427b8aedfe2d28, type: 2}
-          StreamLogsToMainEditor: 0
+          BuildProfile: {fileID: 11400000, guid: 71506bde134bc804abb974f157133a47, type: 2}
+          StreamLogsToMainEditor: 1
           LogsColor: {r: 0.3643, g: 0.581, b: 0.8679, a: 1}
           Arguments: -screen-fullscreen 0 -screen-width 1024 -screen-height 720
         m_Decorators: []
@@ -60,5 +60,5 @@ MonoBehaviour:
         m_Settings:
           PlayerTag: 
           RoleMask: 1
-          InitialScene: {fileID: 102900000, guid: 8124e5870f4fd4c779e7a5f994e84ad1, type: 3}
+          InitialScene: {fileID: 102900000, guid: b5f31c44dec4a924ea1148ba80732b28, type: 3}
         m_Decorators: []
