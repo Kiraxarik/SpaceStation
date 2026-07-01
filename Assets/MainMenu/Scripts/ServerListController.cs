@@ -29,7 +29,7 @@ public class ServerListController : MonoBehaviour
     [SerializeField] uint appId = 480;        // Spacewar (dev). Your AppID later.
 
     [Header("Join")]
-    [SerializeField] string gameplayScene = "OutdoorsScene"; // scene whose SubScene has the player ghost prefab
+    [SerializeField] string gameplayScene = "ServerInGameScene"; // scene whose SubScene has the player ghost prefab
 
     SteamServerBrowser _browser;
 
