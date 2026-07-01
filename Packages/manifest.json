@@ -2,6 +2,7 @@
   "dependencies": {
     "com.rlabrecque.steamworks.net": "https://github.com/rlabrecque/Steamworks.NET.git?path=/com.rlabrecque.steamworks.net#2025.163.0",
     "com.unity.collab-proxy": "2.12.4",
+    "com.unity.dedicated-server": "2.0.2",
     "com.unity.entities": "6.5.0",
     "com.unity.entities.graphics": "6.5.0",
     "com.unity.feature.development": "1.0.2",

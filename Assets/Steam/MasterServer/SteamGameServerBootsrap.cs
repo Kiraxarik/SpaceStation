@@ -1,10 +1,19 @@
 ﻿using Steamworks;
+using Unity.Entities;
+using Unity.NetCode;
 using UnityEngine;
 
 /// <summary>
 /// Advertises this dedicated server on Steam's game-server browser. Put it on
 /// the dedicated server build only — NOT alongside SteamBootstrap (that's the
 /// client API; this is the separate Game Server API).
+///
+/// Role-gated: this component lives in MainMenu.unity, which every process
+/// loads (server and client alike, and every MPPM role in-editor). Without a
+/// gate, a client would also call GameServer.Init and try to log on as a
+/// Steam game server — colliding on GamePort/QueryPort with the real server
+/// and double-advertising on the browser. Start() checks for an actual
+/// ServerWorld in this process and no-ops otherwise.
 ///
 /// Anonymous logon is fine for LAN/dev. For the INTERNET browser the server
 /// needs your real AppID plus a Game Server Login Token (GSLT) — at that point
@@ -32,6 +41,16 @@ public class SteamGameServerBootstrap : MonoBehaviour
 
     void Start()
     {
+        // Client processes (including every non-server MPPM role) load this
+        // same MainMenu scene. Only a process that actually created a
+        // ServerWorld should stand up the Steam game-server API.
+        if (!HasServerWorld())
+        {
+            Debug.Log("[SteamGS] No ServerWorld in this process — skipping game-server advertisement.");
+            enabled = false;
+            return;
+        }
+
         // unIP = 0 -> bind all interfaces. eServerModeAuthentication = VAC off,
         // auth on (use eServerModeAuthenticationAndSecure once you have VAC).
         // NOTE: GameServer.Init's signature is the one version-sensitive line —
@@ -64,6 +83,13 @@ public class SteamGameServerBootstrap : MonoBehaviour
 
         Debug.Log($"[SteamGS] Init OK. Logging on anonymously — '{ServerName}' " +
                   $"port {GamePort} (query {QueryPort}).");
+    }
+
+    static bool HasServerWorld()
+    {
+        foreach (var world in World.All)
+            if (world.IsServer()) return true;
+        return false;
     }
 
     void OnConnected(SteamServersConnected_t _)
