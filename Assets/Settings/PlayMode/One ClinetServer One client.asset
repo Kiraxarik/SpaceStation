@@ -33,13 +33,24 @@ MonoBehaviour:
       Hash: c16915d1f789adfc5d3631ffc39c502e
     m_InstanceItems:
     - rid: 7941354147995975967
-    - rid: 7941354147995975969
-    - rid: 7941354147995975976
+    - rid: 3561971295283314769
   references:
     version: 2
     RefIds:
     - rid: -2
       type: {class: , ns: , asm: }
+    - rid: 3561971295283314769
+      type: {class: 'InstanceItem`2[[Unity.Multiplayer.PlayMode.Editor.LocalPlayerController, UnityEditor.MultiplayerModule],[Unity.Multiplayer.PlayMode.Editor.LocalPlayerController/InstanceSettings, UnityEditor.MultiplayerModule]]', ns: Unity.Multiplayer.PlayMode.Editor, asm: UnityEditor.MultiplayerModule}
+      data:
+        m_Id: ff0c4f42d92b456eada6cc41882337bf
+        m_Name: Player 2
+        m_RunMode: 0
+        m_Settings:
+          BuildProfile: {fileID: 11400000, guid: 0e6f92216b59fdf4bb427b8aedfe2d28, type: 2}
+          StreamLogsToMainEditor: 0
+          LogsColor: {r: 0.3643, g: 0.581, b: 0.8679, a: 1}
+          Arguments: -screen-fullscreen 0 -screen-width 1024 -screen-height 720
+        m_Decorators: []
     - rid: 7941354147995975967
       type: {class: 'InstanceItem`2[[Unity.Multiplayer.PlayMode.Editor.MainEditorController, UnityEditor.MultiplayerModule],[Unity.Multiplayer.PlayMode.Editor.MainEditorController/InstanceSettings, UnityEditor.MultiplayerModule]]', ns: Unity.Multiplayer.PlayMode.Editor, asm: UnityEditor.MultiplayerModule}
       data:
@@ -50,29 +61,4 @@ MonoBehaviour:
           PlayerTag: 
           RoleMask: 1
           InitialScene: {fileID: 102900000, guid: 8124e5870f4fd4c779e7a5f994e84ad1, type: 3}
-        m_Decorators: []
-    - rid: 7941354147995975969
-      type: {class: 'InstanceItem`2[[Unity.Multiplayer.PlayMode.Editor.CloneEditorController, UnityEditor.MultiplayerModule],[Unity.Multiplayer.PlayMode.Editor.CloneEditorController/InstanceSettings, UnityEditor.MultiplayerModule]]', ns: Unity.Multiplayer.PlayMode.Editor, asm: UnityEditor.MultiplayerModule}
-      data:
-        m_Id: 7cf23bbcb6214d8da5ffbc98df222fed
-        m_Name: Player 2
-        m_RunMode: 0
-        m_Settings:
-          PlayerTag: 
-          RoleMask: 1
-          PlayerInstanceIndex: 1
-          StreamLogsToMainEditor: 0
-          LogsColor: {r: 0.3643, g: 0.581, b: 0.8679, a: 1}
-        m_Decorators: []
-    - rid: 7941354147995975976
-      type: {class: 'InstanceItem`2[[Unity.Multiplayer.PlayMode.Editor.LocalPlayerController, UnityEditor.MultiplayerModule],[Unity.Multiplayer.PlayMode.Editor.LocalPlayerController/InstanceSettings, UnityEditor.MultiplayerModule]]', ns: Unity.Multiplayer.PlayMode.Editor, asm: UnityEditor.MultiplayerModule}
-      data:
-        m_Id: 902d9d484f304971b190141c6ec34464
-        m_Name: Instance
-        m_RunMode: 1
-        m_Settings:
-          BuildProfile: {fileID: 11400000, guid: 0e6f92216b59fdf4bb427b8aedfe2d28, type: 2}
-          StreamLogsToMainEditor: 0
-          LogsColor: {r: 0.3643, g: 0.581, b: 0.8679, a: 1}
-          Arguments: -screen-fullscreen 0 -screen-width 1024 -screen-height 720
         m_Decorators: []

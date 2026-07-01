@@ -2791,7 +2791,7 @@ MonoBehaviour:
   contentRoot: {fileID: 1264789358}
   entryPrefab: {fileID: 6489425134722980200, guid: ba88b37e623a8454d9fdca3592b94bc4, type: 3}
   appId: 480
-  gameplayScene: OutdoorsScene
+  gameplayScene: ServerInGameScene
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

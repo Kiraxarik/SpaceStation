@@ -1,0 +1,9 @@
+{
+    "startStrategy": "allready",
+    "minPlayersToStart": 1,
+    "startCountdownSeconds": 10,
+    "unreadyTimeoutSeconds": 0,
+    "maxPlayers": 50,
+    "serverName": "My Station",
+    "serverDescription": ""
+}
