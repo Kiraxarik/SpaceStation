@@ -303,7 +303,12 @@ struct LODBuildResult
 
 // ── System ────────────────────────────────────────────────────────────────────
 
-[UpdateAfter(typeof(ChunkLODSystem))]
+// See ChunkMeshSystem for the full rationale — same bug, same fix, duplicated
+// because this is a separate SystemBase class: ChunkLODSystem already declares
+// [UpdateBefore(typeof(ChunkLODMeshSystem))], and the [UpdateAfter] this used to
+// carry couldn't resolve in the server world because ChunkLODSystem is filtered
+// out of it entirely while this system previously wasn't.
+[WorldSystemFilter(WorldSystemFilterFlags.ClientSimulation)]
 public partial class ChunkLODMeshSystem : SystemBase
 {
     Entity _prototype;

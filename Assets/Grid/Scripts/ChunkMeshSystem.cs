@@ -227,7 +227,20 @@ struct ChunkBuildResult
 
 // ── System ────────────────────────────────────────────────────────────────────
 
-[UpdateAfter(typeof(ChunkLODSystem))]
+// ChunkLODSystem already declares [UpdateBefore(typeof(ChunkMeshSystem))], so an
+// [UpdateAfter(typeof(ChunkLODSystem))] here was redundant even when it worked —
+// and it didn't work in the server world: ChunkLODSystem carries
+// [WorldSystemFilter(ClientSimulation)] and is never created on the server at
+// all, while this system had no such filter and relied on a runtime
+// `Enabled = false` self-disable in OnCreate instead. Unity's system-ordering
+// graph builds before that runtime check ever runs, so in the server world it
+// tried to order against a ChunkLODSystem instance that was never created there
+// — hence "Ignoring invalid [UpdateAfterAttribute]... make sure both systems are
+// in the same system group" on every single launch. The actual fix is this
+// filter, not the ordering attribute: excluding the system from the server
+// world entirely removes both the log spam and the pointless instantiate-then-
+// disable.
+[WorldSystemFilter(WorldSystemFilterFlags.ClientSimulation)]
 public partial class ChunkMeshSystem : SystemBase
 {
     Entity _prototype;

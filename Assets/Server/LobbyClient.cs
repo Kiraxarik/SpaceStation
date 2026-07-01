@@ -5,10 +5,7 @@ using UnityEngine;
 /// <summary>
 /// Sends the CommitToPlayRequest RPC from UI code (the Ready button's OnClick).
 /// Called by LobbyUIController; can also be called from mod lobby UI later.
-///
-/// Once this is used, remove the auto-commit from LobbyClientSystem:
-/// delete the CommitToPlayRequest send block there and let this be the
-/// only commit path.
+/// The sole commit path — LobbyClientSystem carries no auto-commit of its own.
 /// </summary>
 public static class LobbyClient
 {
