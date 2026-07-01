@@ -17,6 +17,19 @@ public partial struct FlyingMovementSystem : ISystem
     private const float MoveSpeed = 10f;
     private const float BoostMultiplier = 2f;
 
+    public void OnCreate(ref SystemState state)
+    {
+        // NetworkTime doesn't exist yet on the very first ticks after the
+        // world is created — before a connection, before any ghost exists.
+        // SystemAPI.GetSingleton<NetworkTime>() below throws if it's missing,
+        // and inside [BurstCompile] code that throw is an unrecoverable
+        // native abort rather than a catchable exception (this was crashing
+        // the client on boot). RequireForUpdate makes ECS simply skip
+        // OnUpdate entirely until the singleton exists, instead of calling
+        // in and crashing.
+        state.RequireForUpdate<NetworkTime>();
+    }
+
     [BurstCompile]
     public void OnUpdate(ref SystemState state)
     {
