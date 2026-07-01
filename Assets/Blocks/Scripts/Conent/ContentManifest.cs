@@ -12,24 +12,35 @@ using System.Collections.Generic;
 ///
 /// This is shared infrastructure: it operates purely on string IDs and knows
 /// nothing about blocks. Blocks are the first user; any future content that
-/// lives in the dense byte array (≤256 ids) can reuse it. Rich per-instance
+/// lives in the dense byte array (≤65536 ids) can reuse it. Rich per-instance
 /// content (parts, items) lives in the sparse entity layer and keys off string
-/// IDs directly — it does NOT need a byte manifest, so the 256 ceiling here is
+/// IDs directly — it does NOT need a numeric manifest, so the ceiling here is
 /// the dense tile space only, not a global content limit.
+///
+/// Numeric ids are ushort, not byte: BlockElement.Value widened to ushort to
+/// remove the 256-identity ceiling (a single block can burn up to 6 distinct
+/// tile ids, so 256 block types bites fast once mods stack up). ushort gives
+/// 65,536 identities, which is effectively uncapped for anything this project
+/// will realistically ship — past that you'd want a wider wire type, not a
+/// different scheme.
 ///
 /// Stable string ID  = canonical identity, authored, namespaced (base:wall_panel).
 /// Session numeric ID = per-session wire optimization, assigned here, never authored.
 /// </summary>
 public sealed class ContentManifest
 {
-    public const byte AirId = 0;
+    public const ushort AirId = 0;
     public const string AirName = "base:air";
+
+    /// <summary>Numeric ids are ushort-bounded (§1.5). Air occupies index 0, so
+    /// the remaining space is [1, MaxCount - 1].</summary>
+    public const int MaxCount = ushort.MaxValue + 1; // 65536, incl. air
 
     // index = numeric id, value = string id. [0] is always AirName.
     readonly string[] _byNumericId;
-    readonly Dictionary<string, byte> _numericByName;
+    readonly Dictionary<string, ushort> _numericByName;
 
-    ContentManifest(string[] byNumericId, Dictionary<string, byte> numericByName)
+    ContentManifest(string[] byNumericId, Dictionary<string, ushort> numericByName)
     {
         _byNumericId = byNumericId;
         _numericByName = numericByName;
@@ -42,10 +53,10 @@ public sealed class ContentManifest
     public IReadOnlyList<string> Order => _byNumericId;
 
     /// <summary>String id for a numeric id, or null if out of range.</summary>
-    public string NameOf(byte id) => (uint)id < (uint)_byNumericId.Length ? _byNumericId[id] : null;
+    public string NameOf(ushort id) => (uint)id < (uint)_byNumericId.Length ? _byNumericId[id] : null;
 
     /// <summary>Numeric id for a string id. False if the manifest doesn't contain it.</summary>
-    public bool TryGetId(string name, out byte id) => _numericByName.TryGetValue(name, out id);
+    public bool TryGetId(string name, out ushort id) => _numericByName.TryGetValue(name, out id);
 
     // ── Authoritative build (server, or any local deterministic build) ─────────
 
@@ -81,18 +92,18 @@ public sealed class ContentManifest
     {
         if (order == null || order.Count == 0 || !string.Equals(order[0], AirName, StringComparison.Ordinal))
             throw new ArgumentException($"Manifest order must begin with '{AirName}' at index 0.");
-        if (order.Count > 256)
+        if (order.Count > MaxCount)
             throw new ArgumentException(
-                $"Manifest has {order.Count} entries; dense tile ids are byte-bounded (max 256 including air).");
+                $"Manifest has {order.Count} entries; dense tile ids are ushort-bounded (max {MaxCount} including air).");
 
         var byId = new string[order.Count];
-        var byName = new Dictionary<string, byte>(order.Count, StringComparer.Ordinal);
+        var byName = new Dictionary<string, ushort>(order.Count, StringComparer.Ordinal);
 
         for (int i = 0; i < order.Count; i++)
         {
             string name = order[i];
             byId[i] = name;
-            byName[name] = (byte)i;   // last-wins on a duplicated id in the ordering
+            byName[name] = (ushort)i;   // last-wins on a duplicated id in the ordering
         }
 
         return new ContentManifest(byId, byName);

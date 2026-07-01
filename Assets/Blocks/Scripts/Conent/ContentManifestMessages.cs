@@ -6,7 +6,7 @@ using Unity.NetCode;
 
 /// <summary>
 /// Sent once by the client after it goes in-game, asking the server for its
-/// authoritative content manifest (the string id ↔ session byte id ordering,
+/// authoritative content manifest (the string id ↔ session numeric id ordering,
 /// architecture §1.5). The server replies with a stream of ContentManifestEntryRpc
 /// followed by one ContentManifestCompleteRpc.
 ///
@@ -24,13 +24,15 @@ public struct ContentManifestRequestRpc : IRpcCommand { }
 /// irrelevant — each entry carries its own NumericId, so the client places each
 /// at the right index regardless of arrival order.
 ///
-/// FixedString128Bytes caps a string id at 125 UTF-8 bytes. Namespaced ids
-/// (base:wall_panel, mymod:some_block) fit comfortably; the server logs an error
-/// if an id is ever too long for the wire.
+/// NumericId is ushort (§1.5: dense ids are ushort-bounded, 65536 incl. air —
+/// widened from byte to remove the 256-block-type ceiling, since one block can
+/// reference up to 6 distinct tile ids). FixedString128Bytes caps a string id at
+/// 125 UTF-8 bytes. Namespaced ids (base:wall_panel, mymod:some_block) fit
+/// comfortably; the server logs an error if an id is ever too long for the wire.
 /// </summary>
 public struct ContentManifestEntryRpc : IRpcCommand
 {
-    public byte NumericId;
+    public ushort NumericId;
     public FixedString128Bytes StringId;
 }
 

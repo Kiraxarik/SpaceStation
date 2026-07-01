@@ -7,10 +7,16 @@ using UnityEngine;
 /// <summary>
 /// Client side of the manifest handshake (architecture §1.5). On going in-game:
 ///   1. Send ContentManifestRequestRpc once.
-///   2. Collect ContentManifestEntryRpc into a staging table, indexed by numeric id.
+///   2. Collect ContentManifestEntryRpc into a staging table, keyed by numeric id.
 ///   3. On ContentManifestCompleteRpc, once all entries are present, adopt the
 ///      server ordering via BlockRegistry.InitializeFromManifest and tag the
 ///      connection ContentManifestReady.
+///
+/// Staging is a Dictionary<ushort, string> rather than a fixed-size array: numeric
+/// ids are ushort-bounded (§1.5, up to 65536), and real content is nowhere near
+/// that — a flat `new string[65536]` would just be a wasted allocation for actual
+/// mod-scale counts. The dictionary costs memory proportional to what's actually
+/// received.
 ///
 /// Local definitions (loaded at startup by ContentBootstrap and cached in
 /// BlockRegistry) supply the DATA — faces, sim properties. The server supplies the
@@ -26,10 +32,8 @@ using UnityEngine;
 [UpdateBefore(typeof(ClientChunkReceiveSystem))]
 public partial class ClientContentManifestSystem : SystemBase
 {
-    // Staging for the in-flight manifest. A single manifest per connection, so
-    // flat arrays sized to the byte id space are enough.
-    readonly string[] _staging = new string[256];
-    readonly bool[] _got = new bool[256];
+    // Staging for the in-flight manifest. A single manifest per connection.
+    readonly Dictionary<ushort, string> _staging = new();
     int _received;
     int _expected = -1;
     bool _adopted;
@@ -65,11 +69,10 @@ public partial class ClientContentManifestSystem : SystemBase
                      .WithAll<ReceiveRpcCommandRequest>()
                      .WithEntityAccess())
         {
-            byte nid = entry.ValueRO.NumericId;
-            if (!_got[nid])
+            ushort nid = entry.ValueRO.NumericId;
+            if (!_staging.ContainsKey(nid))
             {
                 _staging[nid] = entry.ValueRO.StringId.ToString();
-                _got[nid] = true;
                 _received++;
             }
             ecb.DestroyEntity(rpcEntity);
@@ -98,13 +101,13 @@ public partial class ClientContentManifestSystem : SystemBase
         var order = new List<string>(_expected);
         for (int i = 0; i < _expected; i++)
         {
-            if (!_got[i])
+            if (!_staging.TryGetValue((ushort)i, out string name))
             {
                 // Gap despite the count matching — a dropped/duplicate id. Bail and
                 // wait; reliable delivery should fill it on a subsequent frame.
                 return;
             }
-            order.Add(_staging[i]);
+            order.Add(name);
         }
 
         BlockRegistry.InitializeFromManifest(order);
@@ -128,8 +131,7 @@ public partial class ClientContentManifestSystem : SystemBase
 
     void ResetStaging()
     {
-        System.Array.Clear(_got, 0, _got.Length);
-        System.Array.Clear(_staging, 0, _staging.Length);
+        _staging.Clear();
         _received = 0;
         _expected = -1;
         _adopted = false;

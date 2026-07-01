@@ -21,7 +21,9 @@ public struct ChunkCoordRegistry : IComponentData
 public struct ChunkBlockUpdate : IBufferElementData
 {
     public int BlockIndex;
-    public byte NewValue;
+
+    /// <summary>ushort, not byte (§1.5) — mirrors BlockElement.Value's width.</summary>
+    public ushort NewValue;
 }
 
 /// <summary>
@@ -38,5 +40,7 @@ public struct WorldSnapshotRequested : IComponentData { }
 public struct ServerBlockChange : IComponentData
 {
     public int3 WorldBlock;   // global block coords
-    public byte NewValue;
+
+    /// <summary>ushort, not byte (§1.5) — mirrors BlockElement.Value's width.</summary>
+    public ushort NewValue;
 }

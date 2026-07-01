@@ -30,11 +30,12 @@ public struct BlockChangedEvent : IComponentData
     /// <summary>Flat index within the chunk buffer (ChunkSettings.Index result).</summary>
     public int LocalIndex;
 
-    /// <summary>Block type that was there before this write (0 = air).</summary>
-    public byte OldValue;
+    /// <summary>Block type that was there before this write (0 = air). ushort,
+    /// not byte (§1.5) — mirrors BlockElement.Value's width.</summary>
+    public ushort OldValue;
 
     /// <summary>Block type written (0 = cleared to air).</summary>
-    public byte NewValue;
+    public ushort NewValue;
 
     /// <summary>True when this write brought the chunk into existence for the first time.</summary>
     public bool IsNewChunk;

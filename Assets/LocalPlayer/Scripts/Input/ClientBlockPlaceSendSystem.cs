@@ -11,18 +11,24 @@ using UnityEngine.InputSystem;
 /// Handles first-person block interaction:
 ///   Left click  — destroy the targeted block (send air to server)
 ///   Right click — place the selected block on the targeted face
-///   1           — select floor_tile
-///   2           — select wall_panel
+///   1           — cycle selection forward (smallest id → largest, wraps)
+///   2           — cycle selection backward (largest id → smallest, wraps)
+///
+/// Cycling replaces the old hardcoded "1 = floor_tile, 2 = wall_panel" — that
+/// only ever reached two specific base-game blocks by name. Cycling walks every
+/// block id that actually has local content (BlockRegistry.Definitions), so any
+/// block from any loaded mod is reachable without knowing its string id up
+/// front — including one that only just finished downloading via asset sync.
 ///
 /// Uses a DDA (Digital Differential Analyser) voxel raycast to find which
 /// block the camera is looking at. This is more reliable than a physics
 /// raycast against greedy-merged meshes, which have no 1:1 block colliders.
 ///
-/// Only interacts while the cursor is locked (Tab toggles lock per
-/// SpectatorInputSystem). Interacting while the cursor is free would mean
-/// clicking on UI or outside the game window.
-///
-/// Delete ClientBlockPlaceSendSystem.cs — this replaces it entirely.
+/// Only interacts while the cursor is locked (Tab toggles, or click-to-lock —
+/// see SpectatorInputSystem). Interacting while the cursor is free would mean
+/// clicking on UI or outside the game window. Also skips the exact frame the
+/// cursor just locked (SpectatorInputSystem.JustLocked), so the click that
+/// re-engages control doesn't also fire a destroy/place.
 /// </summary>
 [WorldSystemFilter(WorldSystemFilterFlags.ClientSimulation)]
 public partial class BlockInteractionSystem : SystemBase
@@ -33,7 +39,8 @@ public partial class BlockInteractionSystem : SystemBase
 
     // ── State ─────────────────────────────────────────────────────────────────
 
-    byte _selectedBlock; // runtime byte id of the currently held block type
+    // ushort, not byte (§1.5) — mirrors BlockElement.Value's width.
+    ushort _selectedBlock; // runtime numeric id of the currently held block type
     bool _registryReady;
 
     EntityQuery _playerQuery;
@@ -60,11 +67,19 @@ public partial class BlockInteractionSystem : SystemBase
 
     protected override void OnUpdate()
     {
-        // Resolve block ids lazily — BlockRegistry may not be ready at OnCreate.
-        if (!_registryReady && BlockRegistry.Faces.Length > 0)
+        // Resolve a default selection lazily — BlockRegistry may not be ready at
+        // OnCreate, and content can grow later (asset sync). Gate on Definitions
+        // specifically, not Faces: Faces can be nonzero from manifest ids that
+        // don't have local data yet (§1.5 "awaiting asset sync"), which aren't
+        // valid to select for placement.
+        if (!_registryReady && BlockRegistry.Definitions.Count > 0)
         {
-            _selectedBlock = BlockRegistry.GetId("floor_tile");
+            var ids = new List<ushort>(BlockRegistry.Definitions.Keys);
+            ids.Sort();
+            _selectedBlock = ids[0];
             _registryReady = true;
+            Debug.Log($"[BlockInteraction] Default selection: " +
+                      $"{BlockRegistry.NameById.GetValueOrDefault(_selectedBlock, "?")} (id={_selectedBlock})");
         }
         if (!_registryReady) return;
 
@@ -72,23 +87,19 @@ public partial class BlockInteractionSystem : SystemBase
         var mouse = Mouse.current;
         if (keyboard == null || mouse == null) return;
 
-        // ── Block selection ────────────────────────────────────────────────────
+        // ── Block selection (cycle forward/backward) ────────────────────────────
         if (keyboard.digit1Key.wasPressedThisFrame)
-        {
-            _selectedBlock = BlockRegistry.GetId("floor_tile");
-            Debug.Log($"[BlockInteraction] Selected: floor_tile (id={_selectedBlock})");
-        }
+            CycleSelection(forward: true);
         if (keyboard.digit2Key.wasPressedThisFrame)
-        {
-            _selectedBlock = BlockRegistry.GetId("wall_panel");
-            Debug.Log($"[BlockInteraction] Selected: wall_panel (id={_selectedBlock})");
-        }
+            CycleSelection(forward: false);
 
         // ── Interaction requires locked cursor ─────────────────────────────────
         bool leftClick = mouse.leftButton.wasPressedThisFrame;
         bool rightClick = mouse.rightButton.wasPressedThisFrame;
 
-        if ((!leftClick && !rightClick) || Cursor.lockState != CursorLockMode.Locked)
+        if ((!leftClick && !rightClick)
+            || Cursor.lockState != CursorLockMode.Locked
+            || SpectatorInputSystem.JustLocked)
             return;
 
         // ── Resolve player transform ───────────────────────────────────────────
@@ -118,7 +129,8 @@ public partial class BlockInteractionSystem : SystemBase
 
         // ── Determine target block and send RPC ────────────────────────────────
         int3 worldBlock;
-        byte newValue;
+        // ushort, not byte (§1.5) — mirrors BlockElement.Value's width.
+        ushort newValue;
 
         if (leftClick)
         {
@@ -142,6 +154,41 @@ public partial class BlockInteractionSystem : SystemBase
         ecb.AddComponent(req, new SendRpcCommandRequest { TargetConnection = connection });
         ecb.Playback(EntityManager);
         ecb.Dispose();
+    }
+
+    // ── Block selection cycling ───────────────────────────────────────────────
+
+    /// <summary>
+    /// Advances _selectedBlock to the next (or previous) valid block id, wrapping
+    /// at either end. Rebuilds the sorted id list on demand — only runs on an
+    /// actual keypress, not every frame, so there's no reason to cache it and
+    /// risk it going stale after content downloads mid-session (asset sync).
+    /// </summary>
+    void CycleSelection(bool forward)
+    {
+        var ids = new List<ushort>(BlockRegistry.Definitions.Keys);
+        if (ids.Count == 0) return;
+        ids.Sort();
+
+        int currentIndex = ids.IndexOf(_selectedBlock);
+        int nextIndex;
+        if (currentIndex < 0)
+        {
+            // Current selection isn't in the valid set (shouldn't normally
+            // happen once _registryReady is true, but content can change under
+            // us) — land on the first entry either direction rather than guess.
+            nextIndex = forward ? 0 : ids.Count - 1;
+        }
+        else
+        {
+            nextIndex = forward
+                ? (currentIndex + 1) % ids.Count
+                : (currentIndex - 1 + ids.Count) % ids.Count;
+        }
+
+        _selectedBlock = ids[nextIndex];
+        string name = BlockRegistry.NameById.GetValueOrDefault(_selectedBlock, "?");
+        Debug.Log($"[BlockInteraction] Selected: {name} (id={_selectedBlock})");
     }
 
     // ── DDA voxel raycast ─────────────────────────────────────────────────────

@@ -23,9 +23,10 @@ using Unity.NetCode;
 /// Consequence systems (power, atmospherics, mass, …) query those events this
 /// frame; BlockChangedEventCleanupSystem destroys them at frame end.
 ///
-/// Full chunks (4096 bytes) exceed NetCode's single-packet RPC limit, so they
-/// are split into ChunkDataFragmentRpc pieces and reassembled client-side.
-/// Deltas are tiny and sent as a single RPC.
+/// A full chunk (ChunkSettings.BYTE_SIZE bytes — 8192 now that blocks are ushort,
+/// §1.5) exceeds NetCode's single-packet RPC limit, so it's always split into
+/// ChunkDataFragmentRpc pieces and reassembled client-side. Deltas are tiny and
+/// sent as a single RPC.
 ///
 /// -- PERSISTENCE SEAM --
 /// ChunkDataStore is in-memory. Swap for disk/DB; the request/broadcast paths
@@ -40,10 +41,25 @@ public partial class ServerChunkSystem : SystemBase
     protected override void OnCreate()
     {
         _store = new ChunkDataStore();
+
+        // Used only for section 2/3's broadcast-to-everyone-in-game path below —
+        // correct to require NetworkStreamInGame there, since a live delta should
+        // only go to players who actually have a spawned body, not to someone
+        // still sitting in the lobby with their initial snapshot mid-flight.
         _connectionQuery = GetEntityQuery(
             ComponentType.ReadOnly<NetworkId>(),
             ComponentType.ReadOnly<NetworkStreamInGame>());
-        RequireForUpdate<NetworkStreamInGame>();
+
+        // NOT the system-level gate, though: RequireForUpdate<NetworkStreamInGame>
+        // here would stop the WHOLE system ticking — including section 1, which
+        // answers RequestWorldSnapshotRpc via source.ValueRO.SourceConnection
+        // directly, nothing to do with _connectionQuery. Server-side,
+        // NetworkStreamInGame is only added at RoundPhase.Running ∧ Committed
+        // (PlayerSpawnServerSystem), so gating the system on it meant a client's
+        // snapshot request — sent before they can possibly be Committed — would
+        // never get answered. NetworkId is present as soon as the connection
+        // exists, which is all the system needs to be worth ticking at all.
+        RequireForUpdate<NetworkId>();
     }
 
     protected override void OnUpdate()
@@ -96,7 +112,7 @@ public partial class ServerChunkSystem : SystemBase
     /// If the chunk did not exist, it is created and the full chunk is sent
     /// (fragmented); otherwise only the delta is sent.
     /// </summary>
-    void ApplyPlacement(int3 worldBlock, byte newValue,
+    void ApplyPlacement(int3 worldBlock, ushort newValue,
                         NativeArray<Entity> connections, EntityCommandBuffer ecb)
     {
         int3 chunkCoord = WorldBlockToChunk(worldBlock, out int3 local);
@@ -108,14 +124,14 @@ public partial class ServerChunkSystem : SystemBase
             return;
 
         // Read old value before the write so the event carries both.
-        byte oldValue = chunkExisted ? _store.GetBlock(chunkCoord, blockIndex) : (byte)0;
+        ushort oldValue = chunkExisted ? _store.GetBlock(chunkCoord, blockIndex) : (ushort)0;
 
         _store.SetBlock(chunkCoord, blockIndex, newValue, out bool created);
 
         if (created)
         {
             // Brand-new chunk: clients have never seen it. Send the whole thing.
-            byte[] data = _store.Get(chunkCoord);
+            ushort[] data = _store.Get(chunkCoord);
             BroadcastChunkFragments(connections, chunkCoord, data, ecb);
         }
         else
@@ -152,12 +168,15 @@ public partial class ServerChunkSystem : SystemBase
     /// ChunkDataFragmentRpc pieces that each fit inside a single packet.
     /// </summary>
     static void BroadcastChunkFragments(NativeArray<Entity> connections, int3 coord,
-                                        byte[] data, EntityCommandBuffer ecb)
+                                        ushort[] data, EntityCommandBuffer ecb)
     {
+        var wireBytes = new byte[ChunkSettings.BYTE_SIZE];
+        ChunkBlockCodec.FromUshortArray(data, wireBytes);
+
         int count = ChunkFragmentCodec.FragmentCount;
         for (int f = 0; f < count; f++)
         {
-            var rpc = ChunkFragmentCodec.Build(coord, data, f);
+            var rpc = ChunkFragmentCodec.Build(coord, wireBytes, f);
             for (int i = 0; i < connections.Length; i++)
             {
                 var e = ecb.CreateEntity();
@@ -172,12 +191,15 @@ public partial class ServerChunkSystem : SystemBase
     /// per-client world snapshot on join.
     /// </summary>
     static void SendChunkFragments(Entity connection, int3 coord,
-                                   byte[] data, EntityCommandBuffer ecb)
+                                   ushort[] data, EntityCommandBuffer ecb)
     {
+        var wireBytes = new byte[ChunkSettings.BYTE_SIZE];
+        ChunkBlockCodec.FromUshortArray(data, wireBytes);
+
         int count = ChunkFragmentCodec.FragmentCount;
         for (int f = 0; f < count; f++)
         {
-            var rpc = ChunkFragmentCodec.Build(coord, data, f);
+            var rpc = ChunkFragmentCodec.Build(coord, wireBytes, f);
             var e = ecb.CreateEntity();
             ecb.AddComponent(e, rpc);
             ecb.AddComponent(e, new SendRpcCommandRequest { TargetConnection = connection });
@@ -220,29 +242,29 @@ public partial class ServerChunkSystem : SystemBase
 
     sealed class ChunkDataStore
     {
-        readonly System.Collections.Generic.Dictionary<int3, byte[]> _chunks = new();
+        readonly System.Collections.Generic.Dictionary<int3, ushort[]> _chunks = new();
 
         public bool Has(int3 coord) => _chunks.ContainsKey(coord);
 
-        public byte[] Get(int3 coord) => _chunks[coord];
+        public ushort[] Get(int3 coord) => _chunks[coord];
 
         /// <summary>Returns the block value at blockIndex, or 0 if the chunk doesn't exist.</summary>
-        public byte GetBlock(int3 coord, int blockIndex)
-            => _chunks.TryGetValue(coord, out byte[] blocks) ? blocks[blockIndex] : (byte)0;
+        public ushort GetBlock(int3 coord, int blockIndex)
+            => _chunks.TryGetValue(coord, out ushort[] blocks) ? blocks[blockIndex] : (ushort)0;
 
         public System.Collections.Generic.IEnumerable<
-            System.Collections.Generic.KeyValuePair<int3, byte[]>> AllChunks() => _chunks;
+            System.Collections.Generic.KeyValuePair<int3, ushort[]>> AllChunks() => _chunks;
 
         /// <summary>
         /// Applies a block change, allocating the chunk's buffer if it's new.
         /// <paramref name="created"/> is true when this call brought the chunk
         /// into existence.
         /// </summary>
-        public void SetBlock(int3 coord, int blockIndex, byte value, out bool created)
+        public void SetBlock(int3 coord, int blockIndex, ushort value, out bool created)
         {
-            if (!_chunks.TryGetValue(coord, out byte[] blocks))
+            if (!_chunks.TryGetValue(coord, out ushort[] blocks))
             {
-                blocks = new byte[ChunkSettings.VOLUME]; // all air
+                blocks = new ushort[ChunkSettings.VOLUME]; // all air
                 _chunks[coord] = blocks;
                 created = true;
             }

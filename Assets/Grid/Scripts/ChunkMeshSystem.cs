@@ -13,13 +13,14 @@ using UnityEngine.Rendering;
 [BurstCompile]
 public struct BuildChunkMeshJob : IJob
 {
-    [ReadOnly] public NativeArray<byte> Blocks;
-    [ReadOnly] public NativeArray<byte> NeighborPosY;
-    [ReadOnly] public NativeArray<byte> NeighborNegY;
-    [ReadOnly] public NativeArray<byte> NeighborPosX;
-    [ReadOnly] public NativeArray<byte> NeighborNegX;
-    [ReadOnly] public NativeArray<byte> NeighborPosZ;
-    [ReadOnly] public NativeArray<byte> NeighborNegZ;
+    // ushort, not byte (§1.5) — mirrors BlockElement.Value's width.
+    [ReadOnly] public NativeArray<ushort> Blocks;
+    [ReadOnly] public NativeArray<ushort> NeighborPosY;
+    [ReadOnly] public NativeArray<ushort> NeighborNegY;
+    [ReadOnly] public NativeArray<ushort> NeighborPosX;
+    [ReadOnly] public NativeArray<ushort> NeighborNegX;
+    [ReadOnly] public NativeArray<ushort> NeighborPosZ;
+    [ReadOnly] public NativeArray<ushort> NeighborNegZ;
     [ReadOnly] public NativeArray<int> BlockFaceAtlas;
 
     public NativeList<float3> Vertices;
@@ -53,7 +54,7 @@ public struct BuildChunkMeshJob : IJob
                 for (int u = 0; u < S; u++)
                 {
                     pos[uAxis] = u; pos[vAxis] = v; pos[axis] = slice;
-                    byte here = Blocks[ChunkSettings.Index(pos.x, pos.y, pos.z)];
+                    ushort here = Blocks[ChunkSettings.Index(pos.x, pos.y, pos.z)];
                     int encoded = 0;
                     if (here != 0 && NeighborIsAir(pos, axis, +1))
                         encoded = BlockFaceAtlas[here * 6 + forwardDir] + 1;
@@ -65,7 +66,7 @@ public struct BuildChunkMeshJob : IJob
                 for (int u = 0; u < S; u++)
                 {
                     pos[uAxis] = u; pos[vAxis] = v; pos[axis] = slice;
-                    byte here = Blocks[ChunkSettings.Index(pos.x, pos.y, pos.z)];
+                    ushort here = Blocks[ChunkSettings.Index(pos.x, pos.y, pos.z)];
                     int encoded = 0;
                     if (here != 0 && NeighborIsAir(pos, axis, -1))
                         encoded = BlockFaceAtlas[here * 6 + backwardDir] + 1;
@@ -198,7 +199,7 @@ public struct BuildChunkMeshJob : IJob
         if (nx >= 0 && nx < S && ny >= 0 && ny < S && nz >= 0 && nz < S)
             return Blocks[ChunkSettings.Index(nx, ny, nz)] == 0;
 
-        NativeArray<byte> slice;
+        NativeArray<ushort> slice;
         int su, sv;
         if (axis == 1) { slice = sign > 0 ? NeighborPosY : NeighborNegY; su = pos.x; sv = pos.z; }
         else if (axis == 0) { slice = sign > 0 ? NeighborPosX : NeighborNegX; su = pos.z; sv = pos.y; }
@@ -214,7 +215,7 @@ struct ChunkBuildResult
 {
     public Entity Entity;
     public int3 Coord;
-    public NativeArray<byte> Blocks;
+    public NativeArray<ushort> Blocks;
     public NativeList<float3> Vertices;
     public NativeList<float2> UVs;
     public NativeList<float2> AtlasUVs;
@@ -243,11 +244,31 @@ public partial class ChunkMeshSystem : SystemBase
         if (_blockFaceAtlas.IsCreated) _blockFaceAtlas.Dispose();
     }
 
+    /// <summary>
+    /// Forces the next EnsureAtlas() call to rebuild _blockFaceAtlas (and rebind
+    /// the material's Texture2DArray) from scratch. Called by ClientAssetSyncSystem
+    /// after a download changes local content — without this, a newly-downloaded
+    /// tile's texture would never make it into the already-baked atlas or this
+    /// system's cached slice-index array, even though the file landed on disk and
+    /// BlockRegistry already knows about it.
+    /// </summary>
+    public void InvalidateAtlasCache()
+    {
+        if (_blockFaceAtlas.IsCreated) _blockFaceAtlas.Dispose();
+    }
+
     bool EnsureAtlas()
     {
         if (_blockFaceAtlas.IsCreated) return true;
         if (BlockRegistry.Faces.Length == 0) return false;
         if (!TileAtlasBaker.EnsureBaked()) return false;
+
+        // Rebind the material to whatever TileAtlasBaker just (re)baked. Only
+        // reached when _blockFaceAtlas is being (re)built — once on first bake,
+        // and again whenever InvalidateAtlasCache() forced a rebuild — which are
+        // exactly the moments the bound Texture2DArray can have actually changed.
+        if (_material != null)
+            _material.SetTexture("_TileArray", TileAtlasBaker.Array);
 
         // Resolve each block face's tile id to its Texture2DArray slice once, into
         // a flat int[] the Burst job reads. (Job is unchanged: the int it reads is
@@ -299,20 +320,20 @@ public partial class ChunkMeshSystem : SystemBase
         {
             if (lod.ValueRO.Level != ChunkLODLevel.Full) continue;
 
-            var blocksCopy = new NativeArray<byte>(ChunkSettings.VOLUME, Allocator.TempJob);
-            blocksCopy.CopyFrom(blocks.AsNativeArray().Reinterpret<byte>());
+            var blocksCopy = new NativeArray<ushort>(ChunkSettings.VOLUME, Allocator.TempJob);
+            blocksCopy.CopyFrom(blocks.AsNativeArray().Reinterpret<ushort>());
 
             ChunkNeighborSlices ns =
                 EntityManager.HasComponent<ChunkNeighborSlices>(entity)
                     ? EntityManager.GetComponentObject<ChunkNeighborSlices>(entity)
                     : new ChunkNeighborSlices();
 
-            var nPosY = new NativeArray<byte>(ns.PosY, Allocator.TempJob);
-            var nNegY = new NativeArray<byte>(ns.NegY, Allocator.TempJob);
-            var nPosX = new NativeArray<byte>(ns.PosX, Allocator.TempJob);
-            var nNegX = new NativeArray<byte>(ns.NegX, Allocator.TempJob);
-            var nPosZ = new NativeArray<byte>(ns.PosZ, Allocator.TempJob);
-            var nNegZ = new NativeArray<byte>(ns.NegZ, Allocator.TempJob);
+            var nPosY = new NativeArray<ushort>(ns.PosY, Allocator.TempJob);
+            var nNegY = new NativeArray<ushort>(ns.NegY, Allocator.TempJob);
+            var nPosX = new NativeArray<ushort>(ns.PosX, Allocator.TempJob);
+            var nNegX = new NativeArray<ushort>(ns.NegX, Allocator.TempJob);
+            var nPosZ = new NativeArray<ushort>(ns.PosZ, Allocator.TempJob);
+            var nNegZ = new NativeArray<ushort>(ns.NegZ, Allocator.TempJob);
 
             var verts = new NativeList<float3>(Allocator.TempJob);
             var uvs = new NativeList<float2>(Allocator.TempJob);

@@ -25,7 +25,8 @@ public partial struct WorldSeedSystem : ISystem
         // Wait for the block registry to load before resolving block ids.
         if (BlockRegistry.Faces.Length == 0) return;
 
-        byte floorId = BlockRegistry.GetId("floor_tile");
+        // ushort, not byte (§1.5) — mirrors BlockElement.Value's width.
+        ushort floorId = BlockRegistry.GetId("floor_tile");
         if (floorId == 0) floorId = 1; // fallback numeric id
 
         var ecb = new EntityCommandBuffer(Unity.Collections.Allocator.Temp);

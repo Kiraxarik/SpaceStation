@@ -72,8 +72,12 @@ public class LobbyUIController : MonoBehaviour
 
     void TickLoading()
     {
-        // Transition to lobby once the server has acknowledged us (NetworkId exists).
-        if (GetClientNetworkId() >= 0)
+        // Transition to lobby only once asset sync is fully resolved (§1.B: SYNC
+        // — registry handshake + asset download — happens before LOBBY). Being
+        // connected (NetworkId) is no longer enough on its own: a client missing
+        // mod content needs to finish downloading it first, or it'd enter the
+        // lobby able to request world chunks it can't render correctly yet.
+        if (AssetSyncComplete())
             SetPhase(Phase.Lobby);
     }
 
@@ -125,18 +129,17 @@ public class LobbyUIController : MonoBehaviour
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /// <summary>Returns the local NetworkId value, or -1 if not yet connected.</summary>
-    static int GetClientNetworkId()
+    /// <summary>True once asset sync has finished (AssetSyncReady tag on the connection).</summary>
+    static bool AssetSyncComplete()
     {
         foreach (var world in World.All)
         {
             if (world.Name != "ClientWorld") continue;
             using var q = world.EntityManager.CreateEntityQuery(
-                ComponentType.ReadOnly<NetworkId>());
-            if (q.IsEmpty) return -1;
-            return q.GetSingleton<NetworkId>().Value;
+                ComponentType.ReadOnly<AssetSyncReady>());
+            return !q.IsEmpty;
         }
-        return -1;
+        return false;
     }
 
     /// <summary>True once the LocalPlayer tag exists on the client (body spawned).</summary>

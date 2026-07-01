@@ -8,8 +8,17 @@ using UnityEngine;
 public static class ChunkSettings
 {
     public const int SIZE = 16;
+
+    /// <summary>Block count per chunk. NOT the same as wire byte size any more —
+    /// BlockElement.Value is ushort (§1.5), so raw wire transfer is BYTE_SIZE.</summary>
     public const int VOLUME = SIZE * SIZE * SIZE;
     public const int FACE = SIZE * SIZE;
+
+    /// <summary>Raw byte size of one chunk's block buffer on the wire —
+    /// VOLUME ushorts, little-endian pairs. Use this (not VOLUME) anywhere sizing
+    /// a byte[] for chunk transfer/fragmentation; VOLUME alone under-sizes it by
+    /// half now that blocks are ushort, not byte.</summary>
+    public const int BYTE_SIZE = VOLUME * sizeof(ushort);
 
     public static int Index(int x, int y, int z)
         => x + (y * SIZE) + (z * SIZE * SIZE);
@@ -69,10 +78,17 @@ public struct ChunkPosition : IComponentData
     public int3 Coord;
 }
 
+/// <summary>
+/// Dense per-block identity. ushort, not byte (§1.5) — a byte capped block
+/// types at 256, which a single block already burns through fast since it can
+/// reference up to 6 distinct tile ids and mods stack on top of the base game.
+/// ushort gives 65,536 identities, effectively uncapped. Doubles the dense
+/// buffer's memory footprint (4KB → 8KB per chunk) — trivial.
+/// </summary>
 [InternalBufferCapacity(0)]
 public struct BlockElement : IBufferElementData
 {
-    public byte Value;
+    public ushort Value;
 }
 
 /// <summary>Tag: this chunk's mesh needs rebuilding.</summary>
@@ -108,10 +124,13 @@ public struct LocalPlayer : IComponentData { }
 /// Defaults to all-AIR so that station edges facing empty space correctly
 /// show their outward faces. Previously all-solid, which was right when every
 /// chunk was guaranteed a neighbour — now the world is sparse.
+///
+/// ushort, not byte (§1.5) — mirrors BlockElement.Value's width so a border
+/// slice can hold any block id in the full ushort range.
 /// </summary>
 public class ChunkNeighborSlices : IComponentData
 {
-    public byte[] PosY, NegY, PosX, NegX, PosZ, NegZ;
+    public ushort[] PosY, NegY, PosX, NegX, PosZ, NegZ;
 
     public ChunkNeighborSlices()
     {
@@ -121,9 +140,9 @@ public class ChunkNeighborSlices : IComponentData
     }
 
     // All zeroes = air = face is visible against this neighbour.
-    static byte[] Air() => new byte[ChunkSettings.FACE];
+    static ushort[] Air() => new ushort[ChunkSettings.FACE];
 
-    public byte[] ForDirection(int dir) => dir switch
+    public ushort[] ForDirection(int dir) => dir switch
     {
         0 => PosY,
         1 => NegY,

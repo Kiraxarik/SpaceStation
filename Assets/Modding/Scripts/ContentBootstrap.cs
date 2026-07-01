@@ -30,7 +30,35 @@ public static class ContentBootstrap
     public static AssetManifest AssetManifest { get; private set; }
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
-    static void Boot()
+    static void Boot() => LoadAll();
+
+    /// <summary>
+    /// Re-runs mod discovery and content loading from scratch. Called by
+    /// ClientAssetSyncSystem after the asset-sync download step writes newly
+    /// fetched files to disk, so a mod folder that was incomplete — or entirely
+    /// absent — at Boot() is picked up once its files actually exist.
+    ///
+    /// Rebuilds every registry (BlockRegistry, ModelRegistry, SoundRegistry,
+    /// TileRegistry) and the AssetManifest from the local set, same as Boot().
+    /// This resets BlockRegistry to a freshly-derived LOCAL numeric ordering —
+    /// a caller that already adopted a server-authoritative ordering
+    /// (BlockRegistry.InitializeFromManifest) must re-apply it immediately
+    /// afterward, or block ids drift back out of sync with the server.
+    /// </summary>
+    public static void Reload() => LoadAll();
+
+    /// <summary>Absolute directory of a loaded mod by id, or null if not found.
+    /// Used by ServerAssetSyncSystem to resolve a file request to a real path.</summary>
+    public static string FindModDirectory(string modId)
+    {
+        if (LastResolution == null) return null;
+        foreach (var pkg in LastResolution.Order)
+            if (string.Equals(pkg.Id, modId, System.StringComparison.Ordinal))
+                return pkg.Directory;
+        return null;
+    }
+
+    static void LoadAll()
     {
         var resolution = ModPackageLoader.DiscoverAndResolve();
         LastResolution = resolution;

@@ -35,7 +35,8 @@ using UnityEngine.Rendering;
 [BurstCompile]
 public struct BuildLODMeshJob : IJob
 {
-    [ReadOnly] public NativeArray<byte> Blocks;
+    // ushort, not byte (§1.5) — mirrors BlockElement.Value's width.
+    [ReadOnly] public NativeArray<ushort> Blocks;
     [ReadOnly] public NativeArray<int> BlockFaceAtlas;
     public int Factor;
 
@@ -54,20 +55,20 @@ public struct BuildLODMeshJob : IJob
         // if any block inside is non-air; the representative type is the first
         // non-air block found (break out of all three loops via the rep==0 guards).
         var solid = new NativeArray<bool>(cells * cells * cells, Allocator.Temp);
-        var cellBlock = new NativeArray<byte>(cells * cells * cells, Allocator.Temp);
+        var cellBlock = new NativeArray<ushort>(cells * cells * cells, Allocator.Temp);
 
         for (int cx = 0; cx < cells; cx++)
             for (int cy = 0; cy < cells; cy++)
                 for (int cz = 0; cz < cells; cz++)
                 {
                     int ci = CellIdx(cx, cy, cz, cells);
-                    byte rep = 0;
+                    ushort rep = 0;
 
                     for (int dx = 0; dx < Factor && rep == 0; dx++)
                         for (int dy = 0; dy < Factor && rep == 0; dy++)
                             for (int dz = 0; dz < Factor && rep == 0; dz++)
                             {
-                                byte b = Blocks[ChunkSettings.Index(
+                                ushort b = Blocks[ChunkSettings.Index(
                                     cx * Factor + dx,
                                     cy * Factor + dy,
                                     cz * Factor + dz)];
@@ -97,7 +98,7 @@ public struct BuildLODMeshJob : IJob
 
     void GreedyAxis(
         NativeArray<bool> solid,
-        NativeArray<byte> cellBlock,
+        NativeArray<ushort> cellBlock,
         NativeArray<int> mask,
         int cells, int axis, int forwardDir, int backwardDir)
     {
@@ -201,7 +202,6 @@ public struct BuildLODMeshJob : IJob
     }
 
     // ── Quad emission ─────────────────────────────────────────────────────────
-    // ── Quad emission ─────────────────────────────────────────────────────────
 
     /// <summary>
     /// Per-face texture basis: which world axis (and sign) the tile's U and V
@@ -290,7 +290,7 @@ struct LODBuildResult
 {
     public Entity Entity;
     public int3 Coord;
-    public NativeArray<byte> Blocks;
+    public NativeArray<ushort> Blocks;
     public NativeList<float3> Vertices;
     public NativeList<float2> UVs;
     public NativeList<float2> AtlasUVs;
@@ -320,11 +320,30 @@ public partial class ChunkLODMeshSystem : SystemBase
         if (_blockFaceAtlas.IsCreated) _blockFaceAtlas.Dispose();
     }
 
+    /// <summary>
+    /// Forces the next EnsureAtlas() call to rebuild _blockFaceAtlas (and rebind
+    /// the material's Texture2DArray) from scratch. Called by ClientAssetSyncSystem
+    /// after a download changes local content — mirrors ChunkMeshSystem's method
+    /// of the same name; both mesh systems cache their own atlas index array and
+    /// both need invalidating together.
+    /// </summary>
+    public void InvalidateAtlasCache()
+    {
+        if (_blockFaceAtlas.IsCreated) _blockFaceAtlas.Dispose();
+    }
+
     bool EnsureAtlas()
     {
         if (_blockFaceAtlas.IsCreated) return true;
         if (BlockRegistry.Faces.Length == 0) return false;
         if (!TileAtlasBaker.EnsureBaked()) return false;
+
+        // Rebind the material to whatever TileAtlasBaker just (re)baked — see
+        // ChunkMeshSystem.EnsureAtlas for the full rationale; same fix, same
+        // reason, duplicated because this is a separate SystemBase instance with
+        // its own _material field.
+        if (_material != null)
+            _material.SetTexture("_TileArray", TileAtlasBaker.Array);
 
         // Resolve each block face's tile id to its Texture2DArray slice once, into
         // a flat int[] the Burst job reads. (Job is unchanged: the int it reads is
@@ -377,8 +396,8 @@ public partial class ChunkLODMeshSystem : SystemBase
             int factor = LODFactor(lodState.ValueRO.Level);
             if (factor <= 0) continue;
 
-            var blocksCopy = new NativeArray<byte>(ChunkSettings.VOLUME, Allocator.TempJob);
-            blocksCopy.CopyFrom(blocks.AsNativeArray().Reinterpret<byte>());
+            var blocksCopy = new NativeArray<ushort>(ChunkSettings.VOLUME, Allocator.TempJob);
+            blocksCopy.CopyFrom(blocks.AsNativeArray().Reinterpret<ushort>());
 
             var verts = new NativeList<float3>(Allocator.TempJob);
             var uvs = new NativeList<float2>(Allocator.TempJob);

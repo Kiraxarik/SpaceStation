@@ -14,40 +14,44 @@ using UnityEngine;
 /// the server's authoritative ordering at handshake (InitializeFromManifest)
 /// without re-reading any files.
 ///
+/// Numeric ids are ushort (§1.5) — widened from byte to remove the 256-block-type
+/// ceiling, since a single block can reference up to 6 distinct tile ids and mods
+/// stack. 65,536 identities is effectively uncapped for realistic content.
+///
 /// Numeric ids are assigned, never authored (§1.5):
 ///   BuildLocal               → deterministic local ordering (server, and client at startup)
 ///   InitializeFromManifest   → adopt the server's ordering (client, post-handshake)
 /// </summary>
 public static class BlockRegistry
 {
-    // ── Public API (unchanged contract) ───────────────────────────────────────
+    // ── Public API ────────────────────────────────────────────────────────────
 
     public static BlockFaces[] Faces { get; private set; } = Array.Empty<BlockFaces>();
 
-    public static IReadOnlyDictionary<string, byte> IdByName { get; private set; }
-        = new Dictionary<string, byte>();
+    public static IReadOnlyDictionary<string, ushort> IdByName { get; private set; }
+        = new Dictionary<string, ushort>();
 
-    public static IReadOnlyDictionary<byte, string> NameById { get; private set; }
-        = new Dictionary<byte, string>();
+    public static IReadOnlyDictionary<ushort, string> NameById { get; private set; }
+        = new Dictionary<ushort, string>();
 
-    public static IReadOnlyDictionary<byte, BlockDefinitionData> Definitions { get; private set; }
-        = new Dictionary<byte, BlockDefinitionData>();
+    public static IReadOnlyDictionary<ushort, BlockDefinitionData> Definitions { get; private set; }
+        = new Dictionary<ushort, BlockDefinitionData>();
 
     /// <summary>The session manifest this registry was built from. Module 4 serializes Manifest.Order.</summary>
     public static ContentManifest Manifest { get; private set; }
 
     /// <summary>
-    /// Byte id for a block, or 0 (air) if not found. Accepts a namespaced id
+    /// Numeric id for a block, or 0 (air) if not found. Accepts a namespaced id
     /// ("base:floor_tile") or a bare name ("floor_tile") resolved against base.
     /// </summary>
-    public static byte GetId(string blockName)
+    public static ushort GetId(string blockName)
     {
-        if (IdByName.TryGetValue(blockName, out byte id)) return id;
+        if (IdByName.TryGetValue(blockName, out ushort id)) return id;
         if (!blockName.Contains(':') && IdByName.TryGetValue($"base:{blockName}", out id)) return id;
         return 0;
     }
 
-    public static BlockDefinitionData GetDefinition(byte id)
+    public static BlockDefinitionData GetDefinition(ushort id)
         => Definitions.TryGetValue(id, out var def) ? def : null;
 
     // ── Build ──────────────────────────────────────────────────────────────────
@@ -59,7 +63,7 @@ public static class BlockRegistry
     /// <summary>
     /// Builds the registry from the full, ordered set of block definitions using a
     /// locally-derived deterministic manifest. Called by ContentBootstrap at startup
-    /// (server, and client before it connects).
+    /// (server, and client before it connects) and again by Reload().
     /// </summary>
     public static void BuildLocal(List<BlockDefinitionData> defs)
     {
@@ -102,15 +106,15 @@ public static class BlockRegistry
 
         int count = manifest.Count;
         var faces = new BlockFaces[count];
-        var idByName = new Dictionary<string, byte>(count, StringComparer.Ordinal);
-        var nameById = new Dictionary<byte, string>(count);
-        var defsByByte = new Dictionary<byte, BlockDefinitionData>(count);
+        var idByName = new Dictionary<string, ushort>(count, StringComparer.Ordinal);
+        var nameById = new Dictionary<ushort, string>(count);
+        var defsById = new Dictionary<ushort, BlockDefinitionData>(count);
 
         int missingData = 0;
 
         for (int i = 0; i < count; i++)
         {
-            byte id = (byte)i;
+            ushort id = (ushort)i;
             string name = manifest.NameOf(id);
 
             idByName[name] = id;
@@ -119,7 +123,7 @@ public static class BlockRegistry
             if (defByName.TryGetValue(name, out var def))
             {
                 faces[id] = def.tiles.ToBlockFaces();
-                defsByByte[id] = def;
+                defsById[id] = def;
             }
             else if (id != ContentManifest.AirId)
             {
@@ -130,7 +134,7 @@ public static class BlockRegistry
         Faces = faces;
         IdByName = idByName;
         NameById = nameById;
-        Definitions = defsByByte;
+        Definitions = defsById;
         Manifest = manifest;
 
         string missingNote = missingData > 0

@@ -11,7 +11,7 @@ using Unity.NetCode;
 /// Appends each BlockChangeRpc to the target chunk's ChunkBlockUpdate buffer.
 /// Single-threaded: buffer appends via lookup must not race.
 /// Deltas for chunks the client doesn't have are dropped (it will get correct
-/// state from the next full ChunkDataRpc / snapshot).
+/// state from the next full chunk send / snapshot).
 /// </summary>
 [BurstCompile]
 partial struct ApplyDeltasJob : IJobEntity
@@ -43,8 +43,9 @@ partial struct ApplyDeltasJob : IJobEntity
 ///
 /// Owns the ChunkCoordRegistry. Responsibilities:
 ///   1. On going in-game, send RequestWorldSnapshotRpc exactly once.
-///   2. Receive ChunkDataRpc: create the chunk entity if new (or refill an
-///      existing one), populate its block buffer, mark dirty.
+///   2. Receive ChunkDataFragmentRpc, reassemble into a full chunk's wire bytes,
+///      create the chunk entity if new (or refill an existing one), populate its
+///      block buffer, mark dirty.
 ///   3. Receive BlockChangeRpc: queue the delta onto the chunk's update buffer
 ///      (drained by ChunkApplySystem).
 ///
@@ -60,14 +61,16 @@ public partial class ClientChunkReceiveSystem : SystemBase
     EntityQuery _manifestReadyQuery;
 
     // Reassembly staging for fragmented chunks: coord → partial buffer + tracking.
-    // Full chunks (4096B) exceed NetCode's single-packet RPC limit, so the server
-    // sends them as ChunkDataFragmentRpc pieces; we collect them here until every
-    // fragment for a coord has arrived, then hand the assembled bytes to ReceiveChunk.
+    // A full chunk (ChunkSettings.BYTE_SIZE bytes — 8192 now that blocks are
+    // ushort, §1.5) exceeds NetCode's single-packet RPC limit, so the server
+    // sends it as ChunkDataFragmentRpc pieces; we collect them here until every
+    // fragment for a coord has arrived, then hand the assembled bytes to
+    // ReceiveChunk.
     readonly System.Collections.Generic.Dictionary<int3, ChunkAssembly> _assembling = new();
 
     sealed class ChunkAssembly
     {
-        public byte[] Data = new byte[ChunkSettings.VOLUME];
+        public byte[] Data = new byte[ChunkSettings.BYTE_SIZE];
         public bool[] Got;            // which fragment indices have arrived (dedupe)
         public int Received;          // count of distinct fragments received
         public int Expected = -1;     // total fragments, set from the first one seen
@@ -87,10 +90,14 @@ public partial class ClientChunkReceiveSystem : SystemBase
             ComponentType.ReadOnly<NetworkId>(),
             ComponentType.ReadOnly<NetworkStreamInGame>());
 
-        // Reception is gated until the server content manifest has been adopted,
-        // so no server-numbered block bytes are processed under the wrong numbering.
+        // Reception is gated until asset sync completes (ClientAssetSyncSystem),
+        // which itself waits for the content manifest to be adopted first. That
+        // covers both halves of §1.5/§7.4: no server-numbered block bytes are
+        // processed under the wrong numbering, AND no chunk is meshed against a
+        // block whose texture/model hasn't actually arrived yet — which is what
+        // let ContentManifestReady alone through before AssetSyncReady existed.
         _manifestReadyQuery = GetEntityQuery(
-            ComponentType.ReadOnly<ContentManifestReady>(),
+            ComponentType.ReadOnly<AssetSyncReady>(),
             ComponentType.ReadOnly<NetworkStreamInGame>());
 
         RequireForUpdate<NetworkStreamInGame>();
@@ -103,10 +110,10 @@ public partial class ClientChunkReceiveSystem : SystemBase
 
     protected override void OnUpdate()
     {
-        // ── 0. Gate on the content manifest ────────────────────────────────────
+        // ── 0. Gate on asset sync ───────────────────────────────────────────────
         // Do nothing — neither request the world nor process any incoming chunk
-        // data — until the server manifest has been adopted (ContentManifestReady).
-        // Unprocessed RPCs persist as entities and are handled once ready.
+        // data — until asset sync is complete (AssetSyncReady). Unprocessed RPCs
+        // persist as entities and are handled once ready.
         if (_manifestReadyQuery.IsEmpty)
             return;
 
@@ -131,7 +138,7 @@ public partial class ClientChunkReceiveSystem : SystemBase
         }
 
         // ── 2. Receive fragmented full chunk payloads ──────────────────────────
-        var completedChunks = new System.Collections.Generic.List<ChunkDataRpc>();
+        var completedChunks = new System.Collections.Generic.List<(int3 Coord, byte[] Data)>();
 
         foreach (var (frag, rpcEntity) in
             SystemAPI.Query<RefRO<ChunkDataFragmentRpc>>()
@@ -146,9 +153,9 @@ public partial class ClientChunkReceiveSystem : SystemBase
         ecb.Dispose();
 
         // Now safe: iteration over the RPC query has fully ended.
-        foreach (var rpc in completedChunks)
+        foreach (var (coord, data) in completedChunks)
         {
-            ReceiveChunk(rpc);
+            ReceiveChunk(coord, data);
         }
 
         // ── 3. Receive block-change deltas (Burst job) ─────────────────────────
@@ -168,13 +175,12 @@ public partial class ClientChunkReceiveSystem : SystemBase
 
     /// <summary>
     /// Scatters one chunk fragment into its staging buffer. Once every fragment
-    /// for a coord has arrived, rebuilds a ChunkDataRpc from the staged bytes and
-    /// routes it through the normal ReceiveChunk path (entity create/refill, slice
-    /// refresh, mark dirty). Fragments may span multiple frames; staging persists
-    /// on the system between frames. Reliable RPC delivery guarantees all arrive.
+    /// for a coord has arrived, hands the assembled wire bytes off to be applied
+    /// via ReceiveChunk. Fragments may span multiple frames; staging persists on
+    /// the system between frames. Reliable RPC delivery guarantees all arrive.
     /// </summary>
     void AccumulateFragment(in ChunkDataFragmentRpc frag,
-     System.Collections.Generic.List<ChunkDataRpc> completed)
+     System.Collections.Generic.List<(int3, byte[])> completed)
     {
         if (!_assembling.TryGetValue(frag.Coord, out var asm))
         {
@@ -195,29 +201,24 @@ public partial class ClientChunkReceiveSystem : SystemBase
 
         if (asm.Received >= asm.Expected)
         {
-            var rpc = new ChunkDataRpc { Coord = frag.Coord };
-            rpc.FromByteArray(asm.Data);
-            completed.Add(rpc);
+            completed.Add((frag.Coord, asm.Data));
             _assembling.Remove(frag.Coord);
         }
     }
 
     // ── Full chunk reception ──────────────────────────────────────────────────
 
-    void ReceiveChunk(in ChunkDataRpc data)
+    void ReceiveChunk(int3 coord, byte[] data)
     {
-        int3 coord = data.Coord;
-
         if (!_coordToEntity.TryGetValue(coord, out Entity entity))
         {
             entity = CreateChunkEntity(coord);
             _coordToEntity.TryAdd(coord, entity);
         }
 
-        // Fill block buffer from the RPC payload.
+        // Fill block buffer from the reassembled wire bytes.
         var blocks = EntityManager.GetBuffer<BlockElement>(entity);
-        ChunkDataRpc local = data;
-        local.ToBuffer(blocks);
+        ChunkBlockCodec.ToBuffer(data, blocks);
 
         // Refresh slices on this chunk and its existing neighbors so cross-chunk
         // culling is correct, then mark dirty.
@@ -254,10 +255,10 @@ public partial class ClientChunkReceiveSystem : SystemBase
         if (!EntityManager.HasComponent<ChunkNeighborSlices>(entity)) return;
         var ns = EntityManager.GetComponentObject<ChunkNeighborSlices>(entity);
         var ourBlocks = EntityManager.GetBuffer<BlockElement>(entity)
-            .AsNativeArray().Reinterpret<byte>();
+            .AsNativeArray().Reinterpret<ushort>();
 
         // Pass 1: pure reads — no structural changes allowed in here.
-        var pendingSlices = new System.Collections.Generic.List<(ChunkNeighborSlices nns, int dir, byte[] slice)>();
+        var pendingSlices = new System.Collections.Generic.List<(ChunkNeighborSlices nns, int dir, ushort[] slice)>();
         var pendingDirty = new System.Collections.Generic.List<Entity>();
 
         for (int dir = 0; dir < 6; dir++)
@@ -267,7 +268,7 @@ public partial class ClientChunkReceiveSystem : SystemBase
             if (!EntityManager.HasBuffer<BlockElement>(neighbor)) continue;
 
             var nb = EntityManager.GetBuffer<BlockElement>(neighbor)
-                .AsNativeArray().Reinterpret<byte>();
+                .AsNativeArray().Reinterpret<ushort>();
 
             SetSlice(ns, dir, ExtractBorderSlice(nb, dir ^ 1));
 
@@ -292,10 +293,10 @@ public partial class ClientChunkReceiveSystem : SystemBase
 
     // ── Border slice extraction ───────────────────────────────────────────────
 
-    static byte[] ExtractBorderSlice(NativeArray<byte> blocks, int dir)
+    static ushort[] ExtractBorderSlice(NativeArray<ushort> blocks, int dir)
     {
         int S = ChunkSettings.SIZE;
-        var slice = new byte[ChunkSettings.FACE];
+        var slice = new ushort[ChunkSettings.FACE];
         switch (dir)
         {
             case 0:
@@ -339,7 +340,7 @@ public partial class ClientChunkReceiveSystem : SystemBase
         _ => int3.zero
     };
 
-    static void SetSlice(ChunkNeighborSlices ns, int dir, byte[] s)
+    static void SetSlice(ChunkNeighborSlices ns, int dir, ushort[] s)
     {
         switch (dir)
         {

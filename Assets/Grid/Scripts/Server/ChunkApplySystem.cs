@@ -33,7 +33,8 @@ public partial class ChunkApplySystem : SystemBase
         _registry = SystemAPI.GetSingleton<ChunkCoordRegistry>().Map;
 
         // Collect (entity, index, value) first to avoid mutating mid-iteration.
-        var work = new List<(Entity entity, int index, byte value)>();
+        // ushort, not byte (§1.5) — mirrors BlockElement.Value's width.
+        var work = new List<(Entity entity, int index, ushort value)>();
         var dirtyChunks = new HashSet<Entity>();
 
         foreach (var (updates, entity) in
@@ -78,7 +79,7 @@ public partial class ChunkApplySystem : SystemBase
         if (!EntityManager.HasComponent<ChunkNeighborSlices>(entity)) return;
         var ns = EntityManager.GetComponentObject<ChunkNeighborSlices>(entity);
         var ourBlocks = EntityManager.GetBuffer<BlockElement>(entity)
-            .AsNativeArray().Reinterpret<byte>();
+            .AsNativeArray().Reinterpret<ushort>();
 
         for (int dir = 0; dir < 6; dir++)
         {
@@ -87,7 +88,7 @@ public partial class ChunkApplySystem : SystemBase
             if (!EntityManager.HasBuffer<BlockElement>(neighbor)) continue;
 
             var nb = EntityManager.GetBuffer<BlockElement>(neighbor)
-                .AsNativeArray().Reinterpret<byte>();
+                .AsNativeArray().Reinterpret<ushort>();
 
             SetSlice(ns, dir, ExtractBorderSlice(nb, dir ^ 1));
 
@@ -109,10 +110,10 @@ public partial class ChunkApplySystem : SystemBase
         }
     }
 
-    static byte[] ExtractBorderSlice(NativeArray<byte> blocks, int dir)
+    static ushort[] ExtractBorderSlice(NativeArray<ushort> blocks, int dir)
     {
         int S = ChunkSettings.SIZE;
-        var slice = new byte[ChunkSettings.FACE];
+        var slice = new ushort[ChunkSettings.FACE];
         switch (dir)
         {
             case 0:
@@ -154,7 +155,7 @@ public partial class ChunkApplySystem : SystemBase
         _ => int3.zero
     };
 
-    static void SetSlice(ChunkNeighborSlices ns, int dir, byte[] s)
+    static void SetSlice(ChunkNeighborSlices ns, int dir, ushort[] s)
     {
         switch (dir)
         {

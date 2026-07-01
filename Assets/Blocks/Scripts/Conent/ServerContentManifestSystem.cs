@@ -8,10 +8,11 @@ using UnityEngine;
 /// content manifest to the requesting connection: one ContentManifestEntryRpc
 /// per tile id, then a ContentManifestCompleteRpc.
 ///
-/// The manifest is small (≤256 tile ids), so it's sent as individual reliable
-/// RPCs in one pass — no fragmentation codec needed. If manifests ever grow large
-/// enough to stress the reliable pipeline in a single frame, pace the sends or
-/// pack entries into a fragmented blob; not a concern at base-game scale.
+/// The manifest is sent as individual reliable RPCs in one pass — no
+/// fragmentation codec needed. Up to 65536 entries (§1.5, ushort-bounded) is a
+/// lot of individual RPCs if a modpack ever gets that large; pace the sends or
+/// pack entries into a fragmented blob if the reliable pipeline ever visibly
+/// stresses under one frame's worth. Not a concern at current content scale.
 ///
 /// BlockRegistry.Manifest is populated at server startup (AutoLoad,
 /// BeforeSceneLoad), so it's available well before any client can request it; the
@@ -23,7 +24,15 @@ public partial struct ServerContentManifestSystem : ISystem
 {
     public void OnCreate(ref SystemState state)
     {
-        state.RequireForUpdate<NetworkStreamInGame>();
+        // NOT NetworkStreamInGame: server-side, that tag is only added by
+        // PlayerSpawnServerSystem once RoundPhase.Running ∧ Committed — i.e.
+        // only after the player has already clicked Ready. Gating this system
+        // on it meant the manifest handshake could never run at all, since
+        // reaching Committed requires getting through the lobby first, which
+        // (once anything downstream depends on the handshake finishing) can
+        // never happen. NetworkId is present the instant the connection is
+        // established, both sides, which is all this system actually needs.
+        state.RequireForUpdate<NetworkId>();
     }
 
     public void OnUpdate(ref SystemState state)
@@ -50,7 +59,7 @@ public partial struct ServerContentManifestSystem : ISystem
                 var entry = ecb.CreateEntity();
                 ecb.AddComponent(entry, new ContentManifestEntryRpc
                 {
-                    NumericId = (byte)i,
+                    NumericId = (ushort)i,
                     StringId = ToFixed(order[i]),
                 });
                 ecb.AddComponent(entry, new SendRpcCommandRequest { TargetConnection = connection });

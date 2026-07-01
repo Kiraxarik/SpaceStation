@@ -43,6 +43,29 @@ public static class TileAtlasBaker
         Array = null;
     }
 
+    /// <summary>
+    /// Forces the next EnsureBaked() call to rebuild the Texture2DArray from
+    /// scratch. Called by ClientAssetSyncSystem after asset sync downloads new
+    /// content — EnsureBaked() only ever bakes once per session (_attempted
+    /// latches), so without this call a tile that didn't exist locally at boot
+    /// would download successfully and still never make it into the rendered
+    /// atlas: the array would keep showing the placeholder slice it baked before
+    /// the download happened.
+    ///
+    /// Unlike ResetForPlaySession, this explicitly destroys the old array first —
+    /// that reset only fires at session start (nothing to leak yet), but this one
+    /// can fire mid-session with a real GPU texture already allocated, and just
+    /// dropping the reference would leak the native texture memory until a scene
+    /// reload.
+    /// </summary>
+    public static void InvalidateAndRebake()
+    {
+        if (Array != null) UnityEngine.Object.Destroy(Array);
+        _attempted = false;
+        _sliceById = null;
+        Array = null;
+    }
+
     /// <summary>Bakes once. Returns false if baking failed (e.g. no GPU array support).</summary>
     public static bool EnsureBaked()
     {
