@@ -58,12 +58,42 @@ public class CubeData
     /// <summary>[width, height, depth].</summary>
     public float[] size;
 
-    /// <summary>[u, v] — BOX UV ONLY. Per-face UV (a JSON object instead of a
-    /// 2-element array) isn't supported yet; see BlockbenchGeometryParser
-    /// remarks for why and what that means for a cube using it.</summary>
+    /// <summary>[u, v] — BOX UV. Present only when the cube used Blockbench's
+    /// Box UV mode. Mutually exclusive with uvFaces below.</summary>
     public float[] uv;
+
+    /// <summary>Per-face UV. Populated when the cube used Blockbench's default
+    /// (non-Box-UV) mode — the common case for anything beyond a simple test
+    /// cube. BlockbenchGeometryParser's raw-text pass renames the JSON key from
+    /// "uv" to "uvFaces" when it's an object (as opposed to the 2-element array
+    /// box UV uses), specifically so both shapes can live in typed fields
+    /// instead of one field JsonUtility can't deserialize polymorphically.</summary>
+    public FaceUvSetData uvFaces;
 
     public float[] pivot;      // [x,y,z], optional — cube-local rotation pivot
     public float[] rotation;   // [x,y,z] degrees, optional — cube-local static rotation
     public float inflate = 0f; // optional, expands the cube outward on all axes
+}
+
+/// <summary>Per-face UV rects for one cube, keyed by Bedrock face name.</summary>
+[Serializable]
+public class FaceUvSetData
+{
+    public FaceUvEntry north;
+    public FaceUvEntry south;
+    public FaceUvEntry east;
+    public FaceUvEntry west;
+    public FaceUvEntry up;
+    public FaceUvEntry down;
+}
+
+/// <summary>One face's UV rect: top-left corner in pixel space + size. Size
+/// components may be negative — Blockbench uses that to mean "mirrored on this
+/// axis," and it's honored as-is (not abs'd) since Rect's width/height carry
+/// sign straight through to which UV corner lands on which vertex.</summary>
+[Serializable]
+public class FaceUvEntry
+{
+    public float[] uv;      // [u, v]
+    public float[] uv_size; // [w, h] — may be negative (mirror)
 }
