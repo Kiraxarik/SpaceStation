@@ -1,8 +1,10 @@
 ﻿using System.Collections.Generic;
+using Unity.Collections;
 using Unity.Entities;
 using Unity.Mathematics;
 using Unity.Rendering;
 using Unity.Transforms;
+using UnityEngine;
 using UnityEngine.Rendering;
 
 /// <summary>
@@ -54,6 +56,19 @@ public partial class ChunkModelInstanceSystem : SystemBase
         public UnityEngine.Bounds Bounds;
     }
 
+    /// <summary>Animated counterpart to ModelPrototype: Root is the prototype
+    /// entity for the skeleton's root bone (its children reachable via the
+    /// LinkedEntityGroup buffer added in BuildSkeletonPrototype), everything
+    /// else mirrors ModelPrototype's anchoring data for the same reason —
+    /// dictionary hit per instance, not a re-parse.</summary>
+    struct SkeletonPrototype
+    {
+        public Entity Root;
+        public UnityEngine.Vector3 RootLocalPosition;
+        public quaternion RootBindRotation;
+        public UnityEngine.Bounds Bounds;
+    }
+
     struct ChunkWork
     {
         public Entity ChunkEntity;
@@ -62,6 +77,7 @@ public partial class ChunkModelInstanceSystem : SystemBase
     }
 
     readonly Dictionary<string, ModelPrototype> _prototypes = new();
+    readonly Dictionary<string, SkeletonPrototype> _skeletonPrototypes = new();
 
     protected override void OnCreate()
     {
@@ -106,8 +122,7 @@ public partial class ChunkModelInstanceSystem : SystemBase
         foreach (var w in work)
         {
             foreach (var e in w.ToDestroy)
-                if (EntityManager.Exists(e))
-                    EntityManager.DestroyEntity(e);
+                DestroyInstance(e);
 
             // Spawn everything FIRST, collecting plain Entity refs — do not touch
             // the ChunkModelInstance buffer yet. SpawnInstance's Instantiate (and
@@ -130,7 +145,42 @@ public partial class ChunkModelInstanceSystem : SystemBase
         // ChunkMeshSystem (UpdateAfter this system) owns clearing it at Full LOD.
     }
 
+    /// <summary>Destroys one tracked model instance, whether it's a flat single
+    /// entity or an animated skeleton's root. Skeleton teardown is done
+    /// EXPLICITLY via the LinkedEntityGroup buffer rather than assuming
+    /// EntityManager.DestroyEntity(Entity) cascades through it — that cascade is
+    /// documented for Instantiate; destruction isn't, so it's spelled out here
+    /// instead of guessed at (same "confirm, don't assume" reasoning as this
+    /// file's other structural-change-ordering notes). Buffer contents are read
+    /// into a plain NativeArray before the destroy call, matching the
+    /// read-before-structural-change pattern used everywhere else in this
+    /// system — a GetBuffer handle would otherwise be invalidated by the very
+    /// DestroyEntity call it's feeding.</summary>
+    void DestroyInstance(Entity e)
+    {
+        if (!EntityManager.Exists(e)) return;
+
+        if (EntityManager.HasBuffer<LinkedEntityGroup>(e))
+        {
+            var group = EntityManager.GetBuffer<LinkedEntityGroup>(e);
+            var toKill = new NativeArray<Entity>(group.Length, Allocator.Temp);
+            for (int i = 0; i < group.Length; i++) toKill[i] = group[i].Value;
+            EntityManager.DestroyEntity(toKill);
+            toKill.Dispose();
+        }
+        else
+        {
+            EntityManager.DestroyEntity(e);
+        }
+    }
+
     Entity SpawnInstance(string modelId, int3 worldBlock)
+    {
+        bool animated = ModelRegistry.Get(modelId) is { AnimationPaths.Length: > 0 };
+        return animated ? SpawnSkeletonInstance(modelId, worldBlock) : SpawnFlatInstance(modelId, worldBlock);
+    }
+
+    Entity SpawnFlatInstance(string modelId, int3 worldBlock)
     {
         if (!_prototypes.TryGetValue(modelId, out var proto))
         {
@@ -196,6 +246,129 @@ public partial class ChunkModelInstanceSystem : SystemBase
         EntityManager.AddComponent<Prefab>(prototype);
 
         return new ModelPrototype { Prototype = prototype, Bounds = mesh.bounds };
+    }
+
+    Entity SpawnSkeletonInstance(string modelId, int3 worldBlock)
+    {
+        if (!_skeletonPrototypes.TryGetValue(modelId, out var proto))
+        {
+            proto = BuildSkeletonPrototype(modelId);
+            _skeletonPrototypes[modelId] = proto;
+        }
+
+        // LinkedEntityGroup on the prototype root means this one Instantiate
+        // clones the ENTIRE skeleton (root + every child bone), with Parent
+        // references among the clones automatically remapped to point at each
+        // other rather than at the prototype — the standard DOTS
+        // prefab-hierarchy behavior.
+        Entity rootInstance = EntityManager.Instantiate(proto.Root);
+
+        // Identical anchoring math to SpawnFlatInstance (same bounds
+        // convention — see its remarks), just applied to the root bone's own
+        // pivot-relative position instead of LocalTransform.Identity, since a
+        // skeleton root's prototype position is its pivot, not the origin.
+        UnityEngine.Bounds b = proto.Bounds;
+        float3 authored = new float3(b.center.x, b.min.y, b.center.z);
+        float3 cellTarget = new float3(worldBlock.x + 0.5f, worldBlock.y, worldBlock.z + 0.5f);
+        float3 placementOffset = cellTarget - authored;
+
+        EntityManager.SetComponentData(rootInstance, LocalTransform.FromPositionRotation(
+            placementOffset + (float3)proto.RootLocalPosition, proto.RootBindRotation));
+        // (RootBindRotation is already a Unity.Mathematics quaternion — see
+        // ModelSkeletonCache.BoneEntry — no UnityEngine.Quaternion conversion
+        // needed at this boundary.)
+
+        return rootInstance;
+    }
+
+    SkeletonPrototype BuildSkeletonPrototype(string modelId)
+    {
+        var skeleton = ModelSkeletonCache.Get(modelId);
+        var desc = new RenderMeshDescription(ShadowCastingMode.On, true);
+
+        var entityByIndex = new Entity[skeleton.Bones.Count];
+        var allBones = new List<Entity>(skeleton.Bones.Count);
+
+        Entity rootEntity = Entity.Null;
+        int rootBoneIndex = -1;
+        UnityEngine.Vector3 rootLocalPosition = UnityEngine.Vector3.zero;
+        quaternion rootBindRotation = quaternion.identity;
+
+        // Pass A: create every bone entity with its own per-bone mesh (see
+        // ModelSkeletonCache/BlockbenchGeometryParser.LoadRig — geometry
+        // authored relative to that bone's own pivot, so rotating the entity
+        // pivots the mesh correctly for free) and its rest-pose LocalTransform.
+        // No Parent links yet — ParentIndex can point to a bone later in this
+        // same array (RigBone order isn't guaranteed parent-before-child).
+        for (int i = 0; i < skeleton.Bones.Count; i++)
+        {
+            var bone = skeleton.Bones[i];
+            var renderArray = new RenderMeshArray(new[] { skeleton.Material }, new[] { bone.Mesh });
+
+            Entity e = EntityManager.CreateEntity();
+            RenderMeshUtility.AddComponents(e, EntityManager, desc, renderArray,
+                MaterialMeshInfo.FromRenderMeshArrayIndices(0, 0));
+            EntityManager.AddComponentData(e, LocalTransform.FromPositionRotation(
+                (float3)bone.LocalPosition, bone.BindRotation));
+            EntityManager.AddComponentData(e, new AnimatedBone
+            {
+                ModelId = modelId,
+                BoneName = bone.Name,
+                BindRotation = bone.BindRotation,
+            });
+            EntityManager.AddComponent<Prefab>(e);
+
+            entityByIndex[i] = e;
+            allBones.Add(e);
+
+            if (bone.ParentIndex < 0)
+            {
+                if (rootEntity != Entity.Null)
+                    Debug.LogWarning($"[ChunkModelInstanceSystem] '{modelId}': multiple root bones found; " +
+                                      $"the first one seen wins, ignoring '{bone.Name}' as an additional root.");
+                else
+                {
+                    rootEntity = e;
+                    rootBoneIndex = i;
+                    rootLocalPosition = bone.LocalPosition;
+                    rootBindRotation = bone.BindRotation;
+                }
+            }
+        }
+
+        // Pass B: now every bone entity exists, wire up Parent links. A bone
+        // whose ParentIndex pointed at the SECOND root bone we ignored above
+        // (rare, multi-root file) falls back to parenting under the chosen
+        // root instead of an orphaned entity.
+        for (int i = 0; i < skeleton.Bones.Count; i++)
+        {
+            var bone = skeleton.Bones[i];
+            if (i == rootBoneIndex) continue; // the chosen root has no Parent component at all
+
+            int parentIndex = bone.ParentIndex;
+            Entity parentEntity = (parentIndex >= 0 && parentIndex < entityByIndex.Length)
+                ? entityByIndex[parentIndex]
+                : rootEntity; // ParentIndex < 0 here means "an extra root bone" — fold it under the chosen one
+            EntityManager.AddComponentData(entityByIndex[i], new Parent { Value = parentEntity });
+        }
+
+        // LinkedEntityGroup on the root, root first per DOTS convention — this
+        // is what makes ONE Instantiate(proto.Root) clone the whole skeleton
+        // (see SpawnSkeletonInstance), and what DestroyInstance reads to tear
+        // the whole skeleton back down explicitly.
+        allBones.Remove(rootEntity);
+        allBones.Insert(0, rootEntity);
+        var linkedGroup = EntityManager.AddBuffer<LinkedEntityGroup>(rootEntity);
+        foreach (var e in allBones)
+            linkedGroup.Add(new LinkedEntityGroup { Value = e });
+
+        return new SkeletonPrototype
+        {
+            Root = rootEntity,
+            RootLocalPosition = rootLocalPosition,
+            RootBindRotation = rootBindRotation,
+            Bounds = skeleton.Bounds,
+        };
     }
 
     static int3 LocalCoordOf(int flatIndex)
